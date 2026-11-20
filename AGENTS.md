@@ -1,0 +1,222 @@
+# Agent Guidance
+
+## Backend Structure
+
+Read `docs/backend-architecture.md` before adding or moving backend code.
+`backend/src/app.ts` mounts one router per domain. HTTP parsing and response
+mapping live in `backend/src/modules/<domain>/*.routes.ts`; data access and
+domain logic live behind exactly one named `*.service.ts` facade per module.
+Workers and other modules import that facade. `lib/` and `middleware/` never
+import modules, and `backend/src/routes/` is retired. Keep `buildApp()` free of
+startup side effects; required auth and document-lifecycle probes complete
+before the API listens or a worker claims jobs.
+
+`backend/src/__tests__/architecture.test.ts` enforces these boundaries.
+Document-version mutations belong to the documents module and use its
+lifecycle facade. Queue job handlers live in their domains and are composed
+in `backend/src/jobs/registry.ts`. Shared API/event types live in
+`packages/contracts/`. Preserve Dev's Entra/local session policy, Key Vault
+credential precedence, private Blob transport, text user IDs, and claim-token
+fences while applying this structure.
+
+Migration history stays in public.pgmigrations. Use the standard migration
+runner for upgrades and status; never edit or rename shipped SQL. Explicit
+baseline/mark recovery requires the last verified applied filename and
+--confirm-applied; ordinary upgrades never infer a baseline.
+
+Ordinary numbered SQL runs in one native transaction per file with its history row.
+Do not add transaction controls to new files. Historical BEGIN/COMMIT SQL remains
+unchanged and may leave partial changes on failure. The current SQL loader does
+not support CONCURRENTLY or -- migrate:no-transaction; the runner rejects them
+explicitly. Any future nontransactional migration needs an approved runner change.
+Use a direct/session connection, never a transaction pooler.
+
+Database changes use the next numbered `backend/migrations/NNNN_*.sql` file.
+The same numbered history initializes fresh and existing private PostgreSQL
+databases. Use `web_anon`, `authenticated`, and `service_role` grants with
+explicit signatures; this deployment has no Supabase auth schema or RLS.
+
+## Shared UI guidance
+
+Read `docs/design-system.md` for non-trivial UI changes. Prefer existing
+primitives in `frontend/src/app/components/ui/`, shared web/Word controls in
+`frontend/src/shared/ui/`, and shell components in
+`frontend/src/app/components/shared/` before introducing feature markup or
+dependencies. When a shared control is used by Word, keep its Tailwind `@source`
+entry in `word-addin/src/taskpane/styles.css`. Keep loading states aligned with
+the corresponding layout.
+
+Use plain text for informational labels unless an established interactive pill
+control is appropriate. Preserve visible focus, accessible names for icon-only
+buttons, `type="button"` on non-submit form buttons, and ARIA selection state.
+Use `TABLE_CHECKBOX_CLASS` for standalone table checkboxes. Backend calls should
+go through `mikeApi.ts` so runtime auth and `/api` routing remain consistent.
+Never display raw backend, provider, or database errors; use the established
+generic user-facing fallback while retaining intentional 4xx messages.
+
+## Diagnostic identity
+
+Sentry operation, error-kind, component, stage and job labels are static
+source-authored identifiers; adding one needs no central registration. Never
+interpolate user or dependency data into a diagnostic label, error name or
+computed function name. Preserve upstream errors as causes, not as labels.
+Raw messages, request payloads and arbitrary extras remain filtered centrally.
+The backend diagnostic source-contract test scans all three applications;
+review forwarded helper parameters and mappings as well. See
+`docs/observability.md` for the trust model and examples.
+
+## Verification
+
+## Upstream Compatibility
+
+This project is based on an upstream open-source repository. Prefer the smallest practical changes that achieve the local/Azure migration goals so future upstream changes remain easy to merge.
+
+- Keep changes narrowly scoped to the migration or local-validation need being addressed.
+- Avoid broad rewrites, stylistic churn, file moves, or dependency swaps unless they remove a concrete blocker.
+- Prefer adapter layers, environment switches, and thin local overrides over changing shared application logic.
+- When removing Supabase, AWS, or other upstream dependencies, do it incrementally and preserve upstream-shaped interfaces where practical.
+- Document intentional divergence from upstream so future merges can evaluate conflicts quickly.
+
+## Storage Adapter Boundary
+
+`backend/src/lib/storage.ts` is the policy facade for the upstream-shaped
+`storage/adapter.ts` seam. Transports live only under `lib/storage/`.
+API, worker and storage CLI bootstraps await `initStorage()` before serving or
+claiming work; this resolves credentials through the existing Key Vault-first
+boundary. Desktop uses the same API/worker bootstrap with the filesystem driver.
+`setStorageAdapter()` supports explicit boot-time injection and updates the live
+`storageEnabled` binding. Callers continue importing only the facade.
+
+Mutations (upload, copy, delete, part staging/sealing, streamed write and discard)
+MUST call `requireStorageConfig()` before adapter delegation. Never turn a missing
+adapter into optional success: that can orphan DB rows or finalize durable cleanup
+without deleting bytes (`efdb687` / `2dbce7c` precedent). Signing/download reads
+may return null and list reads may return empty; HEAD retains an explicit
+configuration check so misconfiguration is not evidence a staging object is gone.
+
+Copy must forward the optional source ETag. Azure retains authenticated backend
+block uploads and download proxy fallback (no browser SAS); filesystem retains
+bounded atomic signed PUTs and `/api/download/signed` capabilities. SDK errors
+are translated at the facade, and transport-specific missing-object handling
+must not swallow bucket/container/proxy/auth failures. Preserve claim, actor and
+workspace fences at callers when changing the transport.
+
+## Environment Variables and Secrets
+
+### `.env` files must never contain real secrets in committed form
+
+- The only `.env*` files tracked in git are `*.example` files with placeholder
+  values, used as templates for developers.
+- `.gitignore` excludes `.env`, `.env.*` and explicitly whitelists only
+  `*.example` files. Do not add other whitelist exceptions.
+- Real values — including `NEXT_PUBLIC_*` values that are not technically
+  "secret" but identify our deployment (tenant GUIDs, app-registration GUIDs,
+  deployed FQDNs) — belong in CI/Bicep parameter stores, Key Vault, or
+  build-time injection, never in the repo.
+
+### Don't commit `.env.production`
+
+`.gitignore` rejects every `.env` and `.env.*` except `*.example` files.
+There is no whitelist exception. If you find yourself wanting to add one,
+stop — the rule exists because committing real values ties the source repo
+to a specific deployment, and `NEXT_PUBLIC_*` values count as "real values"
+even when they are not strictly secret (they identify a tenant).
+
+### Runtime config, not build-time baking
+
+The previous design baked customer-specific values (`NEXT_PUBLIC_ENTRA_*`,
+`NEXT_PUBLIC_AUTH_PROVIDER`, `NEXT_PUBLIC_REDIRECT_URI`) into the JS bundle
+at build time. That made the image per-tenant. Issues 030–032 retired that
+pattern; the bundle is now tenant-portable.
+
+How runtime config works now:
+
+- `GET /config` on the backend returns `{ authProvider, entra: {…} }` from
+  server env / Key Vault. Unauthenticated, cacheable.
+- `frontend/src/app/contexts/ConfigContext.tsx` fetches `/config` once on app
+  load and exposes the values via `useConfig()`.
+- The same React hook also caches `authProvider` in `localStorage` under
+  `mike.config.authProvider` so module-level helpers
+  (`getBrowserAccessToken`, `getCachedAuthProvider`) can answer "what mode
+  are we in?" without a React context.
+- Sign-out goes through `GET /api/auth/logout` so the backend, not the
+  browser, constructs the Microsoft logout URL.
+
+Rules to keep this honest:
+
+- **Don't reintroduce `NEXT_PUBLIC_ENTRA_*` or `NEXT_PUBLIC_AUTH_PROVIDER`.**
+  If you need a new value in the browser at runtime, add it to the
+  `/config` response and the `RuntimeConfig` type in `ConfigContext.tsx`,
+  and read it via `useConfig()`.
+- **The only `NEXT_PUBLIC_*` that survives is `NEXT_PUBLIC_API_BASE_URL`.**
+  It is build-time-needed because the bundle has to know where to fetch
+  `/config` from before the runtime config has loaded. It is not
+  customer-specific (defaults to empty / same-origin); pass it as a
+  Docker `--build-arg` for split-origin deployments.
+- **Supabase env vars** (`NEXT_PUBLIC_SUPABASE_URL`,
+  `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`) are needed only when the
+  deployment runs in supabase mode. They are not committed; in non-supabase
+  modes the lazy `getSupabaseClient()` factory throws if anything reaches
+  for them.
+- **Naming convention for any new runtime config.** Server var name is
+  `FOO`; runtime-config field is `foo` in `RuntimeConfig`. No
+  `NEXT_PUBLIC_FOO` companion.
+
+## Backend startup and tests
+
+`backend/src/index.ts` must load `dotenv/config` and `./telemetry` before
+instrumented modules. Application Insights patches modules at load time, so
+moving Express, HTTP, or database imports above telemetry silently disables
+automatic instrumentation.
+
+Express app construction lives in `backend/src/app.ts` as the side-effect-free
+`buildApp()` function. Keep process guards, secret warm-up, and `listen()` in
+`index.ts`; backend route tests mount `buildApp()` through supertest.
+
+Both packages use Vitest:
+
+- `pnpm test` runs the suite once.
+- `pnpm test:watch` runs in watch mode.
+- `pnpm test:coverage` collects coverage.
+
+Frontend tests use Testing Library and MSW. Components requiring runtime
+configuration or authentication should use `renderWithProviders` from
+`frontend/src/test/render.tsx`.
+
+The Express app itself is constructed in `backend/src/app.ts`
+(`buildApp()`, side-effect free); `index.ts` holds only entrypoint
+concerns (dotenv → telemetry → process guards → secret warm-up →
+listen). Route tests mount `buildApp()` via supertest — don't move app
+construction back into `index.ts`.
+
+## Tests
+
+Both packages run vitest: `pnpm test` (once), `pnpm test:watch`,
+`pnpm test:coverage` — in `backend/` (node env + supertest) and
+`frontend/` (jsdom + Testing Library + MSW; harness in
+`frontend/src/test/`, use `renderWithProviders` from `render.tsx` for
+components that need Config/Auth context). Run the affected package's
+suite before committing backend/ or frontend/ source changes.
+
+### Pre-commit checks the agent should run
+
+Before committing changes that touch `.env*` files or env-var lookups:
+
+1. `git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$'` — must
+   return nothing. If it does, you are about to commit a `.env` file that
+   isn't a template.
+2. `grep -rE "process\.env\.NEXT_PUBLIC_[A-Z_]+" frontend/src` — every match
+   should be one of: `NEXT_PUBLIC_API_BASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`,
+   `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`. Anything else means
+   someone tried to reintroduce build-time baking — push back to runtime
+   config in `ConfigContext`.
+3. No tenant-specific identifiers (Entra GUIDs, deployment FQDNs,
+   resource names) should appear in any tracked `.env*.example` or any
+   committed source file. Use placeholders.
+
+## Branch Names
+
+Name branches after the change they contain, using a descriptive prefix such as
+`docs/`, `fix/`, `feat/`, `refactor/`, `test/`, or `chore/` (for example,
+`docs/shorten-readme-telemetry`). Never use `claude/` as a prefix. Upstream
+migration branches keep their established `upstream-sync/` prefix.

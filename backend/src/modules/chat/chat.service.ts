@@ -1,0 +1,91 @@
+// Stable public API. Keep implementations in the topic files below.
+export {
+  getAccessibleChat,
+} from "./chat.access";
+export { getChatMessages } from "./chat.messages";
+export {
+  listChats,
+  createChat,
+  deleteChat,
+  discardRejectedChatInput,
+  type ChatWriteResult,
+} from "./chat.crud";
+export {
+  listChatPeople,
+  listChatGrants,
+  grantChatAccess,
+  revokeChatAccess,
+  leaveChat,
+  withChatLeaveAccess,
+} from "./chat.sharing";
+export { updateChatSettings } from "./chat.settings";
+export { updateChatTitle } from "./chat.titles";
+export { prepareChatStream } from "./chat.prepare";
+export {
+  devLog,
+  appendAssistantEventsToMessage,
+  AssistantStreamError,
+  assistantStreamErrorPayload,
+  ASSISTANT_ERROR_MESSAGE,
+  buildCancelledAssistantMessage,
+  buildStoppedAssistantMessage,
+  extractCitations,
+  isAbortError,
+  runLLMStream,
+  stripTransientAssistantEvents,
+  PROJECT_EXTRA_TOOLS,
+  parseChatMessages,
+  parseOptionalAskInputsResponse,
+  parseOptionalAttachedDocuments,
+  parseOptionalChatId,
+  parseOptionalDisplayedDoc,
+  parseOptionalModel,
+  parseOptionalReasoning,
+  buildProjectDocContext,
+  buildMessages,
+  loadUserMessageSentTimes,
+  userMessageStamper,
+  type MessageTimeContext,
+  buildUserPersonalisationPrompt,
+  buildWorkflowStore,
+  attachPriorReasoning,
+  enrichWithPriorEvents,
+  appendAskInputsResponseToAssistantMessage,
+  runApprovedConnectorActions,
+  writeApprovedConnectorFrames,
+  generateSpotlightNonce,
+  spotlightFilename,
+  createSubagentRunStore,
+  purgeExpiredSubagentRuns,
+  type AskInputsResponseRequest,
+  type AssistantEvent,
+  type ChatDocumentReference,
+  type ChatMessage,
+  type SubagentDefaults,
+  type TabularCellStore,
+  TABULAR_TOOLS,
+  parseOptionalDocumentContext,
+  createReservedAssistantMessageUpdater,
+  createWordClientToolsAdapter,
+  isClientToolCallPending,
+  logAssistantMessageFailure,
+  requestIdOf,
+  reserveAssistantMessage,
+  submitClientToolResult,
+  ACTIVE_WORD_DOCUMENT_ID,
+  buildDocContext,
+  buildWordChatSystemPrompt,
+  withoutEmptyAssistantReservations,
+} from "./engine/index";
+export { generateAssistantChatTitle, logChatTitleFailure } from "./chat.title";
+export { type DocIndex, type ToolCall } from "./engine/types";
+export { findTextMatches } from "./engine/tools/documentOps";
+export { TOOLS } from "./engine/tools/toolSchemas";
+
+export {
+  persistWordDocumentEdits,
+  WORD_EDIT_FORMATS,
+  type WordEditApplyMode,
+} from "./engine/wordDocumentEdits";
+
+export { deleteUserSubagentRuns } from "./engine/tools/delegateRuns";

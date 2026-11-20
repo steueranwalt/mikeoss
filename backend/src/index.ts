@@ -1,126 +1,138 @@
+// Telemetry must initialize before network clients are imported.
 import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
-import { chatRouter } from "./routes/chat";
-import { projectsRouter } from "./routes/projects";
-import { projectChatRouter } from "./routes/projectChat";
-import { documentsRouter } from "./routes/documents";
-import { tabularRouter } from "./routes/tabular";
-import { workflowsRouter } from "./routes/workflows";
-import { userRouter } from "./routes/user";
-import { downloadsRouter } from "./routes/downloads";
+import "./telemetry";
+import { Worker as ThreadWorker } from "node:worker_threads";
+import path from "node:path";
+import { installProcessGuards } from "./lib/processGuards";
+installProcessGuards();
+import { buildApp } from "./app";
+import { initDownloadSigningSecret } from "./lib/downloadTokens";
+import { initStorage } from "./lib/storage";
+import { initManifestSigningKey, manifestPublicKey } from "./lib/manifestSigning";
+import { checkSchemaVersion } from "./lib/schemaCheck";
+import { initServerSessionKeys } from "./lib/serverSession";
+import { closeStreamRunCluster, initStreamRunCluster, streamRunCluster } from "./lib/streamRunCluster";
+import { installStreamRunRelayHandler } from "./lib/streamRuns";
+import { submitClientToolResult } from "./modules/chat/chat.service";
+import { enforceDocumentLifecycleMigration } from "./lib/dbq/lifecycleGuard";
+import { startAllWorkers, stopAllWorkers, WORKER_ROLES, type WorkerRole } from "./workerRuntime";
+import { startRoleThreads, stopRoleThreads } from "./lib/workerRoleThreads";
+import { initSentry } from "./lib/observability/sentry";
+import { getKeyVaultConfig } from "./lib/config";
+import { failBoot, listenOrFail } from "./lib/processLifecycle";
+import { stopExtractionProcess } from "./lib/extraction/isolated";
 
-const app = express();
 const PORT = process.env.PORT ?? 3001;
-const isProduction = process.env.NODE_ENV === "production";
+const HOST = process.env.HOST?.trim() || undefined;
+const workersMode = process.env.WORKERS_MODE === "inline" || process.env.WORKERS_MODE === "none"
+  ? process.env.WORKERS_MODE : "thread";
+let shuttingDown = false;
 
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function minutes(value: number): number {
-  return value * 60 * 1000;
-}
-
-function hours(value: number): number {
-  return minutes(value * 60);
-}
-
-function makeLimiter(options: {
-  windowMs: number;
-  max: number;
-  message?: string;
-}) {
-  return rateLimit({
-    windowMs: options.windowMs,
-    max: options.max,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => req.method === "OPTIONS",
-    message: {
-      detail:
-        options.message ?? "Too many requests. Please try again later.",
-    },
-  });
-}
-
-const generalLimiter = makeLimiter({
-  windowMs: minutes(envInt("RATE_LIMIT_GENERAL_WINDOW_MINUTES", 15)),
-  max: envInt("RATE_LIMIT_GENERAL_MAX", 300),
-});
-
-const chatLimiter = makeLimiter({
-  windowMs: minutes(envInt("RATE_LIMIT_CHAT_WINDOW_MINUTES", 15)),
-  max: envInt("RATE_LIMIT_CHAT_MAX", 30),
-  message: "Too many chat requests. Please try again later.",
-});
-
-const chatCreateLimiter = makeLimiter({
-  windowMs: minutes(envInt("RATE_LIMIT_CHAT_CREATE_WINDOW_MINUTES", 15)),
-  max: envInt("RATE_LIMIT_CHAT_CREATE_MAX", 60),
-});
-
-const uploadLimiter = makeLimiter({
-  windowMs: hours(envInt("RATE_LIMIT_UPLOAD_WINDOW_HOURS", 1)),
-  max: envInt("RATE_LIMIT_UPLOAD_MAX", 50),
-  message: "Too many upload requests. Please try again later.",
-});
-
-app.disable("x-powered-by");
-app.set("trust proxy", envInt("TRUST_PROXY_HOPS", 1));
-
-app.use(
-  helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false,
-    hsts: isProduction
-      ? {
-          maxAge: 15552000,
-          includeSubDomains: true,
+async function startThread(role: WorkerRole): Promise<ThreadWorker> {
+  const isTs = __filename.endsWith(".ts");
+  // Compiled threads inherit source-map/V8 flags; retain Dev readiness handshake.
+  const entry = path.join(__dirname, isTs ? "workerThread.ts" : "workerThread.js");
+  const thread = new ThreadWorker(entry, { ...(isTs ? { execArgv: ["--require", "tsx/cjs"] } : {}), workerData: { role } });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Worker thread startup timed out")), 30_000);
+      const onMessage = (message: unknown) => {
+        if (message === "ready") {
+          clearTimeout(timeout);
+          thread.off("error", onError);
+          thread.off("exit", onExit);
+          thread.off("message", onMessage);
+          resolve();
+        } else if (message && typeof message === "object" && "error" in message) {
+          clearTimeout(timeout);
+          reject(new Error(String(message.error)));
         }
-      : false,
-    referrerPolicy: { policy: "no-referrer" },
-  }),
-);
+      };
+      const onError = (error: Error) => { clearTimeout(timeout); reject(error); };
+      const onExit = (code: number) => { clearTimeout(timeout); reject(new Error(`Worker thread exited during startup (${code})`)); };
+      thread.on("message", onMessage);
+      thread.once("error", onError);
+      thread.once("exit", onExit);
+    });
+  } catch (error) {
+    await thread.terminate();
+    throw error;
+  }
+  thread.on("error", (error) => {
+    if (!shuttingDown) {
+      console.error("Worker thread failed", error);
+      process.exit(1);
+    }
+  });
+  thread.on("exit", (code) => {
+    if (!shuttingDown) {
+      console.error(`Worker thread exited unexpectedly (${code})`);
+      process.exit(1);
+    }
+  });
+  return thread;
+}
 
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL ?? "http://localhost:3000",
-    credentials: true,
-  }),
-);
+async function start(): Promise<void> {
+  const telemetryDsn = await getKeyVaultConfig("sentry-dsn").catch(() => "");
+  if (telemetryDsn) process.env.SENTRY_DSN = telemetryDsn;
+  initSentry("api");
+  await initServerSessionKeys();
+  // Fail fast on the document-lifecycle contract (upstream order: before any
+  // other database-dependent startup) so a missing migration is reported as
+  // such rather than as a stream-run connection failure.
+  await enforceDocumentLifecycleMigration();
+  await initStreamRunCluster();
+  installStreamRunRelayHandler(async (payload) => {
+    if (!payload || typeof payload !== "object") return false;
+    const { callId, userId, result, runId, fence } = payload as Record<string, unknown>;
+    if (typeof callId !== "string" || typeof userId !== "string" || typeof runId !== "string" || typeof fence !== "string") return false;
+    const cluster = streamRunCluster();
+    const [call, run] = await Promise.all([cluster?.toolCall(callId, userId), cluster?.lookup(runId)]);
+    if (!cluster || !call || !run || call.owner_instance !== cluster.instanceId || call.run_id !== runId || call.fence !== fence || run.fence !== fence) return false;
+    const delivered = submitClientToolResult(callId, userId, result);
+    if (delivered) void cluster.settleToolCall(callId, userId).catch(() => {});
+    return delivered;
+  });
+  await initDownloadSigningSecret();
+  await initStorage();
+  await initManifestSigningKey();
+  const signingKey = manifestPublicKey();
+  if (signingKey) console.log(`Export manifests signed with key ${signingKey.key_id}`);
 
-app.use(generalLimiter);
+  const threads = workersMode === "thread" ? await startRoleThreads(WORKER_ROLES, startThread) : [];
+  if (workersMode === "inline") await startAllWorkers();
 
-app.use(express.json({ limit: "50mb" }));
+  const server = listenOrFail(buildApp(), PORT, () => {
+    console.log(`Mike backend running on port ${PORT} (workers: ${workersMode})`);
+    void checkSchemaVersion().catch(() => {});
+  }, undefined, HOST);
 
-app.post("/chat", chatLimiter);
-app.post("/projects/:projectId/chat", chatLimiter);
-app.post("/tabular-review/:reviewId/chat", chatLimiter);
-app.post("/tabular-review/:reviewId/generate", chatLimiter);
-app.post("/chat/create", chatCreateLimiter);
-app.post("/chat/:chatId/generate-title", chatCreateLimiter);
-app.post("/single-documents", uploadLimiter);
-app.post("/single-documents/:documentId/versions", uploadLimiter);
-app.post("/projects/:projectId/documents", uploadLimiter);
+  async function shutdown(signal: string): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const forced = setTimeout(() => process.exit(1), 15_000);
+    forced.unref();
+    try {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => error ? reject(error) : resolve()),
+      );
+      if (workersMode === "inline") await stopAllWorkers();
+      await stopExtractionProcess();
+      await closeStreamRunCluster();
+      await stopRoleThreads(threads);
+      clearTimeout(forced);
+      console.log(`Graceful shutdown complete (${signal})`);
+      process.exit(0);
+    } catch (error) {
+      console.error("Graceful shutdown failed", error);
+      process.exit(1);
+    }
+  }
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+}
 
-app.use("/chat", chatRouter);
-app.use("/projects", projectsRouter);
-app.use("/projects/:projectId/chat", projectChatRouter);
-app.use("/single-documents", documentsRouter);
-app.use("/tabular-review", tabularRouter);
-app.use("/workflows", workflowsRouter);
-app.use("/user", userRouter);
-app.use("/users", userRouter);
-app.use("/download", downloadsRouter);
-
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
-app.listen(PORT, () => {
-  console.log(`Mike backend running on port ${PORT}`);
+void start().catch((error) => {
+  void failBoot(error, "startup");
 });

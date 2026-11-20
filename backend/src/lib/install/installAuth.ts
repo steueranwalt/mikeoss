@@ -1,0 +1,347 @@
+// Install-flow session machinery. See issue 023 §"Bootstrap → Entra
+// handover sequence" for the broader state machine; this file owns the
+// cookie format and the middleware gate.
+//
+// Sessions are HMAC-signed JSON, NOT JWTs — JWT's signature/algorithm
+// negotiation is overkill for a single-issuer single-verifier flow,
+// and the smaller surface keeps the trust boundary obvious.
+
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { Request, Response, NextFunction } from "express";
+import { getConfig, setConfig } from "../config";
+
+const COOKIE_NAME = "mike-install-session";
+const SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export type InstallSessionSource = "bootstrap" | "entra";
+
+export type InstallSession = {
+    /** Random per-session id used to key server-side state (token cache). */
+    id: string;
+    source: InstallSessionSource;
+    issuedAt: number;
+    expiresAt: number;
+};
+
+function b64url(input: string | Buffer): string {
+    const buf = Buffer.isBuffer(input) ? input : Buffer.from(input, "utf-8");
+    return buf
+        .toString("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+}
+
+function fromB64url(s: string): Buffer {
+    const pad = s.length % 4 === 0 ? 0 : 4 - (s.length % 4);
+    return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat(pad), "base64");
+}
+
+async function signingKey(): Promise<Buffer> {
+    const secret = await getConfig("auth-state-secret");
+    if (!secret) {
+        throw new Error(
+            "auth-state-secret missing — required for install-session signing",
+        );
+    }
+    return Buffer.from(secret, "utf-8");
+}
+
+function sign(payload: string, key: Buffer): string {
+    return b64url(createHmac("sha256", key).update(payload).digest());
+}
+
+export async function issueInstallSession(
+    res: Response,
+    source: InstallSessionSource,
+): Promise<InstallSession> {
+    const now = Date.now();
+    const session: InstallSession = {
+        id: randomBytes(16).toString("hex"),
+        source,
+        issuedAt: now,
+        expiresAt: now + SESSION_TTL_MS,
+    };
+    const payload = b64url(JSON.stringify(session));
+    const key = await signingKey();
+    const sig = sign(payload, key);
+    res.cookie(COOKIE_NAME, `${payload}.${sig}`, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        // Lax, not Strict: the OIDC callback redirects back through
+        // login.microsoftonline.com, and SameSite=Strict drops the
+        // just-set cookie on the resulting top-level navigation back
+        // to /install — the browser still treats it as a cross-site
+        // entry. Lax permits the cookie on top-level GET navigations
+        // initiated from any site, which is what an OAuth return is.
+        sameSite: "lax",
+        maxAge: SESSION_TTL_MS,
+        path: "/install",
+    });
+    return session;
+}
+
+export function clearInstallSession(res: Response): void {
+    res.clearCookie(COOKIE_NAME, { path: "/install" });
+}
+
+async function verifySession(raw: string): Promise<InstallSession | null> {
+    const dot = raw.lastIndexOf(".");
+    if (dot < 1) return null;
+    const payload = raw.slice(0, dot);
+    const presented = raw.slice(dot + 1);
+
+    const key = await signingKey();
+    const expected = sign(payload, key);
+    const a = Buffer.from(presented);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+
+    let session: InstallSession;
+    try {
+        session = JSON.parse(fromB64url(payload).toString("utf-8"));
+    } catch {
+        return null;
+    }
+    if (typeof session.expiresAt !== "number" || Date.now() > session.expiresAt) {
+        return null;
+    }
+    if (session.source !== "bootstrap" && session.source !== "entra") return null;
+    // Backwards compat: pre-id sessions still verify; downstream code
+    // that needs the id (token cache lookups) should null-check.
+    if (typeof session.id !== "string") session.id = "";
+    return session;
+}
+
+export async function readInstallSession(
+    req: Request,
+): Promise<InstallSession | null> {
+    const raw = (req as Request & { cookies?: Record<string, string> }).cookies?.[COOKIE_NAME];
+    if (!raw) return null;
+    return verifySession(raw);
+}
+
+// Attach the session to res.locals if present, but DO NOT redirect or
+// 401. The route decides what to render based on whether the session
+// exists (the install page renders the paste form when not signed in,
+// the checklist when signed in).
+export async function loadInstallSession(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+): Promise<void> {
+    res.locals.installSession = await readInstallSession(req);
+    next();
+}
+
+// ── Entra OIDC for /install (slice 8) ───────────────────────────────
+
+export type OidcState = {
+    nonce: string;
+    issuedAt: number;
+};
+
+export async function signOidcState(state: OidcState): Promise<string> {
+    const payload = b64url(JSON.stringify(state));
+    const key = await signingKey();
+    return `${payload}.${sign(payload, key)}`;
+}
+
+export async function verifyOidcState(raw: string | undefined): Promise<OidcState | null> {
+    if (!raw) return null;
+    const dot = raw.lastIndexOf(".");
+    if (dot < 1) return null;
+    const payload = raw.slice(0, dot);
+    const presented = raw.slice(dot + 1);
+    const key = await signingKey();
+    const expected = sign(payload, key);
+    const a = Buffer.from(presented);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    let state: OidcState;
+    try {
+        state = JSON.parse(fromB64url(payload).toString("utf-8"));
+    } catch {
+        return null;
+    }
+    // 10-minute window — same as the main /auth flow.
+    if (Date.now() - state.issuedAt > 10 * 60 * 1000) return null;
+    return state;
+}
+
+// Decodes the JWT payload without verifying the signature. We trust the
+// id_token came directly from Entra over HTTPS during the authorization
+// code exchange — this is just a structured read of the payload, not an
+// authentication step. (The backend's main-app auth pipeline does proper
+// JWKS validation; the install flow only needs claims for the admin-
+// group check below.)
+export function readIdTokenClaims(idToken: string): Record<string, unknown> | null {
+    const parts = idToken.split(".");
+    if (parts.length !== 3) return null;
+    try {
+        return JSON.parse(fromB64url(parts[1]).toString("utf-8")) as Record<string, unknown>;
+    } catch {
+        return null;
+    }
+}
+
+// Compare the user's `groups` claim against the configured admin group
+// ID(s). The KV value may be a single GUID or a comma-separated list,
+// optionally followed by `# display name` comments per the issue 023
+// design — we strip everything after the first `#` and ignore whitespace.
+export async function isInAdminGroup(
+    userGroups: string[] | undefined,
+): Promise<boolean> {
+    if (!userGroups || userGroups.length === 0) return false;
+    const raw = await getConfig("entra-admin-group-ids").catch(() => "");
+    if (!raw) return false;
+    const adminGuids = raw
+        .split(",")
+        .map((s) => s.split("#")[0].trim().toLowerCase())
+        .filter(Boolean);
+    const userGuidSet = new Set(userGroups.map((g) => g.toLowerCase()));
+    return adminGuids.some((g) => userGuidSet.has(g));
+}
+
+// Auto-retirement: blank the bootstrap token so /install no longer
+// accepts the bootstrap path. Idempotent.
+export async function retireBootstrap(): Promise<void> {
+    await setConfig("install-bootstrap-token", "");
+}
+
+// Initial-admin escape hatch. Checks whether the signing-in user's oid
+// matches install-initial-admin-oid. The value may be provisioned during
+// deployment or claimed by the first successful self-bootstrap sign-in
+// below. When matched, the user is
+// granted admin access regardless of group membership — permanent recovery
+// from "I misconfigured the admin group and locked myself out" scenarios.
+//
+// Fail-closed: any KV read failure or empty-config returns false (the
+// caller falls back to the normal admin gate). When the match fires,
+// logs prominently for audit.
+export async function isInitialAdmin(
+    oid: string | undefined,
+    principal: string,
+): Promise<boolean> {
+    if (!oid) return false;
+
+    const expected = (await getConfig("install-initial-admin-oid").catch(() => "")).trim();
+    if (!expected) return false; // not configured — escape hatch disabled
+
+    if (oid.toLowerCase() !== expected.toLowerCase()) return false;
+
+    console.warn("install.initial_admin_granted", {
+        principal,
+        oid,
+        timestamp: new Date().toISOString(),
+    });
+    return true;
+}
+
+// Self-bootstrap fast-path. Closes the chicken-and-egg of a fresh
+// install where the operator hasn't yet configured the
+// admin group: when entra-admin-group-ids is empty in KV, remember the
+// first Entra user's immutable oid and email, then allow them into /install
+// (so they can set the admin group without needing the bootstrap token).
+// The remembered oid remains an escape hatch if the saved group is wrong
+// or Entra does not return it in later membership claims.
+//
+// Per the no-strip-redundant-code principle, the bootstrap-token
+// path stays in source — OSS deployments and break-glass recovery
+// scenarios still use it. This helper only opens a parallel "no
+// admin group set" door.
+//
+// Defensive tenant check: even though the OIDC start route already
+// scopes sign-in to the configured tenantId, we double-check the
+// token's `tid` matches `entra-tenant-id` in KV. B2B guest users
+// or misconfigured `common` authorities could otherwise slip in.
+//
+// Fail-closed: if either KV read errors out, returns false (caller
+// falls back to the normal isInAdminGroup gate). Returning true
+// always logs prominently so the event is auditable.
+// First-visit gate. While entra-admin-group-ids is empty in KV (no admin
+// gate exists yet), allow any visitor to /install through to the
+// configurator without a bootstrap token or Entra sign-in. The state of
+// the admin-group secret IS the gate — open while unset, closed once
+// set. As soon as the operator sets entra-admin-group-ids from inside
+// /install, this fast-path stops firing.
+//
+// Threat model: any tenant-internal user who knows the install URL
+// could race the operator and claim setup. Mitigations are (a) the URL is
+// an unguessable Container Apps subdomain, (b) every grant logs via
+// console.warn for audit, and (c) the provisioned
+// install-initial-admin-oid acts as a permanent escape hatch.
+//
+// Per the no-strip-redundant-code principle, the bootstrap-token paste
+// form remains in source for OSS / break-glass scenarios; this helper
+// just opens a parallel "open door" while the admin group is unset.
+export async function isFirstVisitEligible(): Promise<boolean> {
+    const adminGroupIds = (await getConfig("entra-admin-group-ids").catch(() => "")).trim();
+    return adminGroupIds === "";
+}
+
+function isMissingSecretError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const candidate = error as { statusCode?: unknown; code?: unknown };
+    return (
+        candidate.statusCode === 404 ||
+        candidate.code === "SecretNotFound"
+    );
+}
+
+export async function isSelfBootstrapAllowed(
+    tid: string | undefined,
+    principal: string,
+    oid: string | undefined,
+): Promise<boolean> {
+    if (!tid || !oid) return false;
+
+    const adminGroupIds = (await getConfig("entra-admin-group-ids").catch(() => "")).trim();
+    if (adminGroupIds) return false; // admin group already set — not a bootstrap scenario
+
+    const expectedTenantId = (await getConfig("entra-tenant-id").catch(() => "")).trim();
+    if (!expectedTenantId) return false; // can't verify tenant claim — fail closed
+
+    const tidMatches = tid.toLowerCase() === expectedTenantId.toLowerCase();
+    if (!tidMatches) return false;
+
+    // Persist the first successfully authenticated setup user as the
+    // permanent initial-admin escape hatch before allowing them through.
+    // This prevents the operator from locking themselves out if they save
+    // an admin group that Entra later does not return for their account.
+    //
+    // Never replace an existing value: it may have been provisioned during
+    // deployment or claimed by an earlier setup user.
+    let existingOid: string;
+    try {
+        existingOid = (await getConfig("install-initial-admin-oid")).trim();
+    } catch (error) {
+        if (!isMissingSecretError(error)) return false;
+        existingOid = "";
+    }
+    if (existingOid) {
+        return existingOid.toLowerCase() === oid.toLowerCase();
+    }
+
+    try {
+        await setConfig("install-initial-admin-oid", oid);
+        await setConfig("install-initial-admin-email", principal);
+    } catch (error) {
+        console.error("install.initial_admin_persist_failed", {
+            principal,
+            oid,
+            error: error instanceof Error ? error.message : String(error),
+            timestamp: new Date().toISOString(),
+        });
+        return false;
+    }
+
+    console.warn("install.self_bootstrap_granted", {
+        principal,
+        tid,
+        oid,
+        rememberedAsInitialAdmin: true,
+        timestamp: new Date().toISOString(),
+    });
+    return true;
+}

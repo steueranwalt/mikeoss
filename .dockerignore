@@ -1,0 +1,26 @@
+# Keep Docker/ACR build contexts small and free of local state.
+**/node_modules
+**/dist
+**/.next
+**/.open-next
+**/out
+**/build
+**/coverage
+**/test-results
+**/playwright-report
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+.git
+.gitignore
+.github
+.codex
+.claude
+.vscode
+.idea
+docs
+**/*.test.ts
+**/*.test.tsx
+**/__tests__
+backend/claude-raw-stream.log

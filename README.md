@@ -1,124 +1,163 @@
-# Mike
+# Mike for Azure
 
-Mike is a legal document assistant with a Next.js frontend, an Express backend, Supabase Auth/Postgres, and Cloudflare R2-compatible object storage.
+Mike adapted to run on Microsoft Azure or on a local development stack
+without hosted dependencies. This AGPL-3.0 fork is based on upstream
+[Mike v0.3.0](https://github.com/willchen96/mike/releases/tag/v0.3.0).
 
-Website: [mikeoss.com](https://mikeoss.com)
+The Azure edition adds Microsoft Entra ID, Azure Blob Storage, Azure
+OpenAI, portable runtime configuration, Postgres migrations, and an
+operator-facing `/install` configurator.
 
-## Contents
+## Installation paths
 
-- `frontend/` - Next.js application
-- `backend/` - Express API, Supabase access, document processing, and database schema
-- `backend/schema.sql` - Supabase schema for fresh databases
-- `backend/migrations/` - incremental database updates for existing deployments
+### Local development
 
-## Prerequisites
+Use the local stack to run Postgres, PostgREST, and Azurite:
 
-- Node.js 20 or newer
-- npm
-- git
-- A Supabase project
-- A Cloudflare R2 bucket, MinIO bucket, or another S3-compatible bucket
-- At least one supported model provider API key: Anthropic, Google Gemini, or OpenAI
-- LibreOffice installed locally if you need DOC/DOCX to PDF conversion
+1. Install Node.js 22+, Corepack, Docker, and Docker Compose.
+2. Follow [the local-stack runbook](docs/runbook-local-stack.md).
 
-## Database Setup
-
-For a new Supabase database, open the Supabase SQL editor and run:
-
-```sql
--- copy and run the contents of:
--- backend/schema.sql
-```
-
-The schema file is based on `supabase-migration.sql` and folds in the later files in `backend/migrations/`.
-
-For an existing database, do not run the full schema file over production data. Apply the incremental files in `backend/migrations/` instead.
-
-## Environment
-
-Create local env files:
+The package manager is pnpm:
 
 ```bash
-touch backend/.env
-touch frontend/.env.local
+corepack enable
+cd backend
+pnpm install --frozen-lockfile
+cd ../frontend
+pnpm install --frozen-lockfile
+cd ..
+docker compose -f docker-compose.dev.yml up -d
 ```
 
-Create `backend/.env`:
+Then run `pnpm migrate:dev` and `pnpm dev` from `backend/`, and `pnpm dev`
+from `frontend/`. The backend runs on `http://localhost:3001`; the frontend
+runs on `http://localhost:3000`.
+
+### Telemetry
+
+Sentry error reporting is optional and disabled until this deployment supplies
+its own DSN. The backend reads `sentry-dsn` from Key Vault first, then
+`SENTRY_DSN`; the browser and Word add-in receive their deployment's public,
+write-only DSNs from runtime `/config` (`sentry-frontend-dsn` and
+`sentry-word-dsn` in Key Vault, with `SENTRY_FRONTEND_DSN` and
+`SENTRY_WORD_DSN` as fallbacks). No Sentry address is baked into either
+client bundle. The outbound privacy boundary keeps only bounded diagnostic
+events and excludes document content, credentials, request bodies, and user
+identities. See [observability](docs/observability.md) for configuration and
+limits.
+
+### Manual Azure deployment
+
+For a self-hosted Azure installation, follow
+[Deploying Mike to Azure — minimal self-host](docs/azure-prereqs.md).
+It is the canonical installation guide and assumes a technical operator
+comfortable with Azure CLI, Docker, PowerShell 7, and Entra administration.
+
+Generic helper scripts in [`scripts/install/`](scripts/install/) automate
+the error-prone Entra registration, redirect-URI, Azure OpenAI, and recovery
+steps. They use the operator's current Azure login and contain no deployment
+credentials.
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [MCP connectors](docs/connectors.md)
+- [Google Workspace: Drive, Gmail, and Calendar](docs/google-workspace.md)
+- [Preset contract templates and publisher credits](docs/preset-templates.md)
+- [CourtListener integration](docs/courtlistener.md)
+- [Microsoft Word add-in](word-addin/README.md)
+- [Tamper-evident exports](docs/tamper-evident-exports.md)
+- [Safe local testing](docs/safe-local-testing.md)
+- [Contributing](CONTRIBUTING.md)
+- [Open-source credits](CREDITS.md)
+- [Security policy](SECURITY.md)
+
+## What this fork adds
+
+- Azure Blob Storage alongside the upstream S3-compatible storage path.
+- Microsoft Entra ID alongside Supabase and local authentication.
+- Azure OpenAI alongside Anthropic, Gemini, and OpenAI.
+- Postgres 16+ migrations that do not require Supabase-managed auth tables.
+- A tenant-portable frontend configured at runtime through `GET /config`.
+- A single-container production build that serves the exported frontend
+  and Express API.
+- A local-first Docker stack requiring no Azure subscription.
+
+## Repository layout
+
+- `backend/` — Express API, provider adapters, and schema migrations.
+- `frontend/` — statically exported Next.js application.
+- `scripts/install/` — optional operator-side Azure and Entra helpers.
+- `scripts/local-stack/` — local Postgres, PostgREST, and Azurite support.
+- `docs/azure-prereqs.md` — canonical manual Azure installation guide.
+- `docs/runbook-local-stack.md` — local development guide.
+- `docs/fork-delta.md` — maintained differences from upstream v0.3.0.
+- `Dockerfile` — production image bundling frontend and backend.
+
+## Required services
+
+- Postgres 16+.
+- Azure Blob Storage, Azurite, or an S3-compatible object store.
+- At least one supported LLM provider.
+- LibreOffice for DOC/DOCX-to-PDF conversion; it is included in the
+  production image.
+
+## Tamper-evident export
+
+Mike hashes a document version's bytes (SHA-256) whenever it writes them.
+`GET /api/projects/:projectId/export` returns a manifest of those hashes plus
+the accept/reject trail. To check a file you were given, run
+`shasum -a 256 lease.docx` and compare it to the manifest. Versions written
+before this shipped carry a `null` hash, so they read as unverifiable rather
+than as falsely verified.
+
+The manifest also carries a SHA-256 `digest` over its own body (everything
+except `digest` and `signature`, serialised with object keys sorted, array
+order kept, no whitespace).
+
+Provision a `manifest-signing-key` secret in Key Vault (local dev:
+`MANIFEST_SIGNING_KEY`; a 32-byte hex Ed25519 seed, `openssl rand -hex 32`) to
+sign that digest. The signature is a raw Ed25519 signature over the bytes
+`mike-project-manifest-v1`, a NUL byte, then the digest bytes. Take the public
+key from `GET /api/manifest-signing-key`, not from the manifest: whoever edits a
+manifest can re-sign it with a key of their own, so the embedded copy shows
+consistency, never provenance.
+
+Soft-deleted versions stay in the manifest, carrying their `deleted_at`. A
+trail that dropped them would be a weaker attestation, but it does mean the
+filename and timestamps of a deleted version are visible to anyone with access
+to the project.
+
+## Validation
 
 ```bash
-PORT=3001
-FRONTEND_URL=http://localhost:3000
-DOWNLOAD_SIGNING_SECRET=replace-with-a-random-32-byte-hex-string
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SECRET_KEY=your-supabase-service-role-key
-
-R2_ENDPOINT_URL=https://your-account-id.r2.cloudflarestorage.com
-R2_ACCESS_KEY_ID=your-r2-access-key
-R2_SECRET_ACCESS_KEY=your-r2-secret-key
-R2_BUCKET_NAME=mike
-
-GEMINI_API_KEY=your-gemini-key
-ANTHROPIC_API_KEY=your-anthropic-key
-OPENAI_API_KEY=your-openai-key
-RESEND_API_KEY=your-resend-key
-USER_API_KEYS_ENCRYPTION_SECRET=your-long-random-secret
+(cd backend && pnpm test && pnpm build)
+(cd frontend && pnpm test && pnpm lint && pnpm build)
+docker build -t mike-azure:local .
 ```
 
-Create `frontend/.env.local`:
+## Security
 
-```bash
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY=your-supabase-anon-key
-NEXT_PUBLIC_API_BASE_URL=http://localhost:3001
-```
+See [SECURITY.md](SECURITY.md) for vulnerability reporting. Never commit
+real `.env` files, tenant identifiers, deployment hostnames, or credentials.
+Only placeholder-bearing `*.example` environment templates belong in Git.
 
-Supabase values come from the project dashboard. Use the project URL for `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL`, the service role key for the backend `SUPABASE_SECRET_KEY`, and the anon/public key for `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY`. If your Supabase project shows multiple key formats, use the legacy JWT-style anon and service role keys expected by the Supabase client libraries.
+## License and attribution
 
-Provider keys are only needed for the models and email features you plan to use. Model provider keys can be configured in `backend/.env` for the whole instance, or per user in **Account > Models & API Keys**. If a provider key is present in `backend/.env`, that provider is available by default and the matching browser API key field is read-only.
+AGPL-3.0-only. See [LICENSE](LICENSE).
 
-## Install
+Bundled [public contract templates](docs/preset-templates.md#maintaining-the-catalog)
+retain their publishers' separate licenses and notices.
 
-Install each app package:
+The application is derived from
+[`willchen96/mike`](https://github.com/willchen96/mike). The Azure adaptation
+is maintained by Altien.
 
-```bash
-npm install --prefix backend
-npm install --prefix frontend
-```
+## Microsoft Word add-in
 
-## Run Locally
+The Mike Word add-in brings Mike into a Word task pane for document chat, quick actions, workflows, supporting files, and tracked edits. See [the Word add-in guide](word-addin/README.md) for setup and Entra sign-in.
 
-Start the backend:
+## Google integrations
 
-```bash
-npm run dev --prefix backend
-```
-
-Start the main app:
-
-```bash
-npm run dev --prefix frontend
-```
-
-Open `http://localhost:3000`.
-
-## First Run
-
-1. Sign up in the app.
-2. If you did not set provider keys in `backend/.env`, open **Account > Models & API Keys** and add an Anthropic, Gemini, or OpenAI API key.
-3. Create or open a project and start chatting with documents.
-
-## Troubleshooting
-
-**Sign-up confirmation email never arrives.** Confirmation emails are sent by Supabase Auth, not by Mike. For local development, the simplest fix is to disable email confirmation in **Supabase > Authentication > Providers > Email**. For production, configure custom SMTP in Supabase; the built-in mailer is heavily rate-limited and may be restricted on newer projects.
-
-**The model picker shows a missing-key warning.** Add a key for that provider in **Account > Models & API Keys**, or configure the provider key in `backend/.env` and restart the backend.
-
-**DOC or DOCX conversion fails.** Install LibreOffice locally and restart the backend so document conversion commands are available on the process path.
-
-## Useful Checks
-
-```bash
-npm run build --prefix backend
-npm run build --prefix frontend
-npm run lint --prefix frontend
-```
+Google Drive, Gmail, and Calendar are optional connections in **Settings → Connectors**. Each account is separately authorized; writes require separate consent and explicit review. See [Google Workspace integration](docs/google-workspace.md).
