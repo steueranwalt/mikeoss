@@ -60,6 +60,8 @@ export interface ActiveVersion {
     version_number: number | null;
     filename: string | null;
     source: string | null;
+    /** Gate B4 audit finding N10: carried into a follow-up version's own ai_draft. */
+    ai_draft?: boolean | null;
     file_type: string | null;
     size_bytes: number | null;
     page_count: number | null;
@@ -93,7 +95,7 @@ export async function loadActiveVersion(
     const { data: v } = await db
         .from("document_versions")
         .select(
-            "id, document_id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count",
+            "id, document_id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, ai_draft",
         )
         .eq("id", targetVersionId)
         .is("deleted_at", null)
@@ -104,6 +106,7 @@ export async function loadActiveVersion(
         storage_path: v.storage_path as string,
         pdf_storage_path: (v.pdf_storage_path as string | null) ?? null,
         version_number: (v.version_number as number | null) ?? null,
+        ai_draft: (v.ai_draft as boolean | null) ?? false,
         filename: (v.filename as string | null) ?? null,
         source: (v.source as string | null) ?? null,
         file_type: (v.file_type as string | null) ?? null,

@@ -278,10 +278,14 @@ describe("generated documents are marked AI drafts", () => {
             : await generatePpt("Pitch", SLIDES, "user-1", db as never);
 
       expect(result).not.toHaveProperty("error");
-      const draftUpdate = db.updates.find(
-        (u) => u.table === "document_versions" && u.payload.ai_draft === true,
+      // Gate B4 audit finding N9: ai_draft rides in the same
+      // create_document_version RPC call as the rest of the version, not a
+      // follow-up update.
+      const versionInsert = db.inserts.find(
+        (i) => i.table === "document_versions",
       );
-      expect(draftUpdate).toBeDefined();
+      expect(versionInsert?.payload).toMatchObject({ ai_draft: true });
+      expect(db.updates).toHaveLength(0);
     },
   );
 });
