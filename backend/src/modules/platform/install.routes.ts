@@ -13,6 +13,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import { getConfig, setConfig } from "../../lib/config";
+import { CLIENT_ASSERTION_TYPE, federatedClientAssertion } from "../../lib/auth/providers/entraClientAssertion";
 import { randomBytes } from "node:crypto";
 import {
     clearInstallSession,
@@ -1534,7 +1535,14 @@ installRouter.get("/auth/microsoft/callback", async (req: Request, res: Response
             "https://graph.microsoft.com/GroupMember.Read.All " +
             "https://graph.microsoft.com/Group.Read.All",
     });
-    if (clientSecret) tokenForm.set("client_secret", clientSecret);
+    // Same federated-credential-first precedence as the end-user login flow
+    // (auth.routes.ts); the installer's admin sign-in uses the same Web
+    // Login app registration and should not need a secret either.
+    const installAssertion = await federatedClientAssertion();
+    if (installAssertion) {
+        tokenForm.set("client_assertion_type", CLIENT_ASSERTION_TYPE);
+        tokenForm.set("client_assertion", installAssertion);
+    } else if (clientSecret) tokenForm.set("client_secret", clientSecret);
 
     const tokenResp = await fetch(
         `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
