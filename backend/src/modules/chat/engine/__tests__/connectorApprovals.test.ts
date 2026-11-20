@@ -4,6 +4,7 @@ import type { ConnectorApprovalItem } from "@mike/contracts";
 const mocks = vi.hoisted(() => ({
   google: vi.fn(),
   mcp: vi.fn(),
+  documentEdit: vi.fn(),
 }));
 vi.mock("../../../../lib/integrations/googleWorkspace", async (original) => ({
   ...(await original<
@@ -14,6 +15,10 @@ vi.mock("../../../../lib/integrations/googleWorkspace", async (original) => ({
 vi.mock("../../../../lib/mcpConnectors", async (original) => ({
   ...(await original<typeof import("../../../../lib/mcpConnectors")>()),
   executeApprovedMcpToolCall: mocks.mcp,
+}));
+vi.mock("../../../documents/documents.trackedEdits", async (original) => ({
+  ...(await original<typeof import("../../../documents/documents.trackedEdits")>()),
+  applyTrackedEditsToDocument: mocks.documentEdit,
 }));
 
 import {
@@ -304,6 +309,157 @@ describe("runApprovedConnectorActions", () => {
     ).toEqual([]);
     expect(mocks.google).not.toHaveBeenCalled();
     expect(mocks.mcp).not.toHaveBeenCalled();
+  });
+});
+
+// Gate B4 audit finding L4: edit_document pauses for approval the same way
+// connector writes do (toolDispatcher.ts). These tests cover the other half:
+// what actually happens to the document before and after that approval.
+describe("edit_document approval (Gate B4 audit finding L4)", () => {
+  const editItem: ConnectorApprovalItem = {
+    id: "approve-edit",
+    kind: "approval",
+    connector_name: "Lease.docx",
+    tool_name: "edit_document",
+    title: 'Edit "Lease.docx"',
+    arguments: {
+      doc_id: "doc-0",
+      edits: [
+        {
+          find: "ten days",
+          replace: "five days",
+          context_before: "within ",
+          context_after: ".",
+        },
+      ],
+    },
+    binding: { type: "document_edit", document_id: "d1", client_doc_id: "doc-0" },
+  };
+
+  it("is not applied without approval: a rejected edit never reaches applyTrackedEditsToDocument", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "reject" }],
+      },
+      "user-1",
+    );
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("is not applied while unanswered: no decision means applyTrackedEditsToDocument never runs", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("applies the exact reviewed edits once approved", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.documentEdit.mockResolvedValue({
+      ok: true,
+      version_id: "v2",
+      version_number: 2,
+      storage_path: "documents/u1/d1/edits/v2.docx",
+      download_url: "https://example.test/download/abc",
+      annotations: [{ kind: "edit" }],
+      errors: [],
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).toHaveBeenCalledExactlyOnceWith({
+      documentId: "d1",
+      userId: "user-1",
+      userEmail: null,
+      edits: [
+        {
+          find: "ten days",
+          replace: "five days",
+          context_before: "within ",
+          context_after: ".",
+          reason: undefined,
+        },
+      ],
+      db,
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ approval_id: "approve-edit", status: "ok" });
+  });
+
+  it("stores and returns a document-write failure instead of throwing", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.documentEdit.mockResolvedValue({
+      ok: false,
+      error: "This document changed. Run the review again before applying its suggestions.",
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].status).toBe("error");
   });
 });
 

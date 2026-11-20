@@ -79,7 +79,6 @@ import {
 import { buildDownloadUrl } from "../../../../lib/downloadTokens";
 import { safeErrorLog } from "../../../../lib/safeError";
 import { contentSha256, loadActiveVersion } from "../../../../lib/documentVersions";
-import { type EditInput } from "../../../../lib/docxTrackedChanges";
 import {
   citationReminder,
   generateDocx,
@@ -91,7 +90,6 @@ import {
   readDocumentContent,
   findInDocumentContent,
   findTextMatches,
-  runEditDocument,
   safeGeneratedFilename,
   type DocEditedResult,
   type TurnEditState,
@@ -2009,117 +2007,44 @@ export async function runToolCalls(
           tool_call_id: tc.id,
           content: JSON.stringify({ error: err }),
         });
+      } else if (!options.connectorApprovals) {
+        // Gate B4 audit finding L4: edit_document always needs the user's
+        // approval before it changes a document, the same as a connector
+        // write — on a surface that cannot run an interactive approval
+        // (connectorApprovals false), it cannot run edit_document at all.
+        emitEditError(docInfo.filename, indexed.document_id, APPROVAL_UNAVAILABLE_MESSAGE);
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: APPROVAL_UNAVAILABLE_MESSAGE }),
+        });
       } else {
-        write(
-          `data: ${JSON.stringify({
-            type: "doc_edited_start",
-            filename: docInfo.filename,
-          })}\n\n`,
-        );
-        const edits: EditInput[] = (editsRaw as Record<string, unknown>[]).map(
-          (e) => ({
-            find: String(e.find ?? ""),
-            replace: String(e.replace ?? ""),
-            context_before: String(e.context_before ?? ""),
-            context_after: String(e.context_after ?? ""),
-            reason: e.reason ? String(e.reason) : undefined,
-          }),
-        );
-        const result = await documentLocks.run(indexed.document_id, async () => {
-          signal?.throwIfAborted();
-          const edited = await runEditDocument({
-            documentId: indexed.document_id,
-            userId,
-            userEmail: options.userEmail ?? null,
-            edits,
-            db,
-            reuseVersion: turnEditState?.get(indexed.document_id),
-          });
-          if (edited.ok) {
-            turnEditState?.set(indexed.document_id, {
-              versionId: edited.version_id,
-              versionNumber: edited.version_number,
-              storagePath: edited.storage_path,
-            });
-          }
-          return edited;
-        }, signal);
-
-        if (result.ok) {
-          clearTurnReadsForDocument(turnReadState, indexed.document_id);
-          // Keep the chat-local doc label pointed at the latest
-          // edited version so any follow-up read_document call in
-          // the same assistant turn reads and cites the same bytes.
-          if (docIndex[docId]) {
-            docIndex[docId] = {
-              ...docIndex[docId],
-              version_id: result.version_id,
-              version_number: result.version_number,
-            };
-          }
-          const currentDocStore = docStore.get(docId);
-          if (currentDocStore) {
-            docStore.set(docId, {
-              ...currentDocStore,
-              search_source: undefined,
-              storage_path: result.storage_path,
-            });
-          }
-          const payload: DocEditedResult = {
-            filename: docInfo.filename,
+        // Gate B4 audit finding L4: edit_document pauses for the user's
+        // approval exactly like a connector write — nothing is applied to
+        // the document yet. Approval replays these exact, already-validated
+        // edits through executeApprovedDocumentEdit (connectorApprovals.ts).
+        approvalItems.push({
+          id: crypto.randomUUID(),
+          kind: "approval",
+          connector_name: docInfo.filename,
+          tool_name: "edit_document",
+          title: `Edit "${docInfo.filename}"`,
+          arguments: { doc_id: docId, edits: editsRaw },
+          binding: {
+            type: "document_edit",
             document_id: indexed.document_id,
-            version_id: result.version_id,
-            version_number: result.version_number,
-            download_url: result.download_url,
-            annotations: result.annotations,
-          };
-          docsEdited.push(payload);
-          write(
-            `data: ${JSON.stringify({
-              type: "doc_edited",
-              ...payload,
-            })}\n\n`,
-          );
-          toolResults.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: JSON.stringify({
-              ok: true,
-              doc_id: docId,
-              document_id: indexed.document_id,
-              version_id: result.version_id,
-              version_number: result.version_number,
-              applied: result.annotations.length,
-              errors: result.errors,
-              next_required_action: [
-                `The edited document remains available as doc_id "${docId}".`,
-                `Before making factual claims about the edited document's final contents, call read_document with doc_id "${docId}" and base the response on that returned text.`,
-                `Do not include download links or URLs in your prose response; the edited document card is shown automatically by the UI.`,
-                `If you describe specific content from the edited document, cite it with [N] markers and a final <CITATIONS> block using doc_id "${docId}".`,
-              ].join(" "),
-            }),
-          });
-        } else {
-          write(
-            `data: ${JSON.stringify({
-              type: "doc_edited",
-              filename: docInfo.filename,
-              document_id: indexed.document_id,
-              version_id: "",
-              download_url: "",
-              annotations: [],
-              error: result.error,
-            })}\n\n`,
-          );
-          toolResults.push({
-            role: "tool",
-            tool_call_id: tc.id,
-            content: JSON.stringify({
-              ok: false,
-              error: result.error,
-            }),
-          });
-        }
+            client_doc_id: docId,
+          },
+        });
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            ok: false,
+            status: "awaiting_approval",
+            message: "Waiting for the user's approval. Nothing has been changed yet.",
+          }),
+        });
       }
     } else if (tc.function.name === "replicate_document" && docIndex) {
       const rawDocId = args.doc_id as string;

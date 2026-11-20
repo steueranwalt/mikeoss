@@ -44,6 +44,13 @@ interface VersionPathRow extends DocRow {
     size_bytes?: number | null;
     page_count?: number | null;
     textless_page_count?: number | null;
+    /**
+     * Gate B4 audit finding L4: true while the active version is a
+     * model-authored draft (generate_docx/excel/ppt, write_project_document)
+     * no human has approved yet. The frontend's document list/detail views
+     * show this as a visible "AI draft" indicator.
+     */
+    ai_draft?: boolean | null;
 }
 
 export interface ActiveVersion {
@@ -152,13 +159,14 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             d.page_count = null;
             d.textless_page_count = null;
             d.content_sha256 = null;
+            d.ai_draft = false;
         }
         return docs;
     }
     const { data: rows } = await db
         .from("document_versions")
         .select(
-            "id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, content_sha256",
+            "id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, content_sha256, ai_draft",
         )
         .in("id", versionIds)
         .is("deleted_at", null);
@@ -175,6 +183,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             page_count: number | null;
             textless_page_count: number | null;
             content_sha256: string | null;
+            ai_draft: boolean | null;
         }
     >();
     for (const r of (rows ?? []) as {
@@ -189,6 +198,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
         page_count: number | null;
         textless_page_count: number | null;
         content_sha256: string | null;
+        ai_draft: boolean | null;
     }[]) {
         byId.set(r.id, {
             storage_path: r.storage_path ?? null,
@@ -201,6 +211,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             page_count: r.page_count ?? null,
             textless_page_count: r.textless_page_count ?? null,
             content_sha256: r.content_sha256 ?? null,
+            ai_draft: r.ai_draft ?? null,
         });
     }
     for (const d of docs) {
@@ -215,6 +226,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
         d.page_count = v?.page_count ?? null;
         d.textless_page_count = v?.textless_page_count ?? null;
         d.content_sha256 = v?.content_sha256 ?? null;
+        d.ai_draft = v?.ai_draft ?? false;
     }
     return docs;
 }

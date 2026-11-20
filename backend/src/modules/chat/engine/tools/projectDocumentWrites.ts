@@ -8,7 +8,6 @@ import { buildDownloadUrl } from "../../../../lib/downloadTokens";
 import { uploadFile, versionStorageKey } from "../../../../lib/storage";
 import { createServerSupabase } from "../../../../lib/supabase";
 import { createDocumentVersion } from "../../../documents/documents.service";
-
 type Db = ReturnType<typeof createServerSupabase>;
 
 /**
@@ -278,7 +277,7 @@ export async function writeProjectDocument(
     file_type: fileType,
     size_bytes: bytes.byteLength,
     page_count: null,
-  });
+  }, { aiDraft: true });
   if (versionError || !version) throw new Error(versionError?.message ?? "Failed to create document version");
 
   return {

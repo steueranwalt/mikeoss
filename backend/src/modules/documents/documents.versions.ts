@@ -58,7 +58,7 @@ export async function listVersions(
     const { data: rows } = await db
         .from("document_versions")
         .select(
-            "id, version_number, source, created_at, filename, file_type, size_bytes, page_count, textless_page_count, deleted_at, deleted_by",
+            "id, version_number, source, created_at, filename, file_type, size_bytes, page_count, textless_page_count, deleted_at, deleted_by, ai_draft",
         )
         .eq("document_id", documentId)
         .order("created_at", { ascending: true });
@@ -385,6 +385,56 @@ export async function renameVersion(
         .is("deleted_at", null)
         .select(
             "id, version_number, source, created_at, filename, file_type, size_bytes, page_count, textless_page_count",
+        )
+        .single();
+    if (error || !updated) {
+        return { ok: false, detail: "Version not found" };
+    }
+    return { ok: true, version: updated };
+}
+
+// ---------------------------------------------------------------------------
+// Gate B4 audit finding L4: human approval of an AI-drafted version
+// ---------------------------------------------------------------------------
+
+/**
+ * Clears `ai_draft` on a version generate_docx/generate_excel/generate_ppt
+ * or write_project_document created — the only action that does. There is
+ * no reverse endpoint: once a human has reviewed a draft, re-marking it
+ * draft again is not a feature this audit asked for.
+ */
+export async function approveAiDraftVersion(
+    params: {
+        documentId: string;
+        versionId: string;
+        userId: string;
+        userEmail: string | undefined;
+    },
+    db: Db,
+): Promise<
+    | { ok: true; version: unknown }
+    | { ok: false; detail: string; status?: number }
+> {
+    const { documentId, versionId, userId, userEmail } = params;
+
+    const access = await ensureDocumentAccess(
+        documentId,
+        userId,
+        userEmail,
+        db,
+    );
+    if (!access.ok) return { ok: false, detail: "Document not found" };
+    if (!can(access.projectRole, "content.edit"))
+        return { ok: false, status: 403, detail: DOCUMENT_EDIT_FORBIDDEN };
+
+    const { data: updated, error } = await db
+        .from("document_versions")
+        .update({ ai_draft: false })
+        .eq("id", versionId)
+        .eq("document_id", documentId)
+        .is("deleted_at", null)
+        .select(
+            "id, version_number, source, created_at, filename, file_type, size_bytes, ai_draft",
         )
         .single();
     if (error || !updated) {

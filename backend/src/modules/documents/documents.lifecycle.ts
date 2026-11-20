@@ -40,7 +40,21 @@ export type DocumentVersionRecord = NewDocumentVersion & {
 export async function createDocumentVersion(
   db: Db,
   version: NewDocumentVersion,
-  options: { activate?: boolean; job?: { id: string; attempt: number; token: string }; expectedVersion?: { id: string; storagePath: string }; edits?: Record<string, unknown>[] } = {},
+  options: {
+    activate?: boolean;
+    job?: { id: string; attempt: number; token: string };
+    expectedVersion?: { id: string; storagePath: string };
+    edits?: Record<string, unknown>[];
+    /**
+     * Gate B4 audit finding L4: marks the created version an AI draft until
+     * a human approves it (documents.versions.ts's approveAiDraftVersion).
+     * Only generate_docx/generate_excel/generate_ppt and
+     * write_project_document set this — never edit_document, which instead
+     * requires approval before it writes anything at all
+     * (connectorApprovals.ts's executeApprovedDocumentEdit).
+     */
+    aiDraft?: boolean;
+  } = {},
 ) {
   const { document_id, ...metadata } = version;
   const { data, error } = await db.rpc("create_document_version", {
@@ -49,7 +63,24 @@ export async function createDocumentVersion(
     p_activate: options.activate !== false,
     ...(options.job ? { p_job_identity: options.job, p_expected_version: options.expectedVersion ?? null, p_edits: options.edits ?? [] } : {}),
   });
-  if (!error && data?.id) await processDocumentTextInline(db, [data.id]).catch((err) => logError("document-text", safeError(err)));
+  // The RPC echoes the inserted row's id in production; a caller that
+  // already supplied one (write_project_document generates its own) does
+  // not depend on that echo to know it.
+  const createdId = data?.id ?? version.id;
+  if (!error && createdId) {
+    await processDocumentTextInline(db, [createdId]).catch((err) => logError("document-text", safeError(err)));
+    if (options.aiDraft) {
+      const draftMark = await db
+        .from("document_versions")
+        .update({ ai_draft: true })
+        .eq("id", createdId);
+      // Best-effort: a failure here does not fail document creation — a
+      // draft not yet flagged is strictly safer than failing a document the
+      // user asked for. Logged, not thrown, for the same reason upstream
+      // text-extraction failures above are only logged.
+      if (draftMark.error) logError("documents-ai-draft", safeError(draftMark.error));
+    }
+  }
   return { data: data as DocumentVersionRecord | null, error };
 }
 

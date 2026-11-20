@@ -129,6 +129,19 @@ describe("writeProjectDocument", () => {
     );
   });
 
+  // Gate B4 audit finding L4.
+  it("marks a new model-written document as an AI draft", async () => {
+    const { db, calls } = database();
+
+    const result = await writeProjectDocument(input(), db as never);
+
+    expect(result).toMatchObject({ ok: true });
+    const draftUpdate = calls.find(
+      (call) => call.table === "document_versions" && call.op === "update",
+    );
+    expect(draftUpdate?.payload).toMatchObject({ ai_draft: true });
+  });
+
   it("uploads before writing any metadata so a storage failure leaves no row", async () => {
     const { db, calls } = database();
     uploadFileMock.mockRejectedValue(new Error("storage is not configured"));

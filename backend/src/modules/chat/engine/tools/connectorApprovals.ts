@@ -36,6 +36,8 @@ import {
   loadAssistantMessage,
 } from "../contextBuilders";
 import { TOOL_ERROR_MESSAGE } from "../types";
+import { applyTrackedEditsToDocument } from "../../../documents/documents.service";
+import type { EditInput } from "../../../../lib/docxTrackedChanges";
 
 /** Tool output replayed to the model after an approved call, per call. */
 export const MAX_APPROVAL_RESULT_CHARS = 4_000;
@@ -62,6 +64,80 @@ function isApprovalItem(
   item: AskInputsEvent["items"][number],
 ): item is ConnectorApprovalItem {
   return item.kind === "approval";
+}
+
+/**
+ * Gate B4 audit finding L4: runs an approved edit_document call, replaying
+ * the exact edits the user reviewed (item.arguments.edits) — never a fresh
+ * read of whatever the model might ask for now. This is the only place an
+ * approved document edit actually touches the document; until this runs,
+ * nothing proposed by edit_document has changed anything.
+ *
+ * Unlike the live-turn edit_document path, this runs after the original
+ * streaming turn has ended, so there is no turnEditState/docIndex to update
+ * and no in-turn version reuse: multiple edits to the same document
+ * approved together each produce their own version, not one collapsed
+ * version. The result is reported as a generic connector-style event
+ * (writeApprovedConnectorFrames), not the richer live "doc_edited" card.
+ */
+async function executeApprovedDocumentEdit(
+  item: ConnectorApprovalItem & {
+    binding: Extract<ConnectorApprovalItem["binding"], { type: "document_edit" }>;
+  },
+  userId: string,
+  db: Db,
+): Promise<{ content: string; event: McpToolEvent }> {
+  const baseEvent = {
+    type: "mcp_tool_call" as const,
+    connector_id: "",
+    connector_name: item.connector_name,
+    tool_name: item.tool_name,
+    openai_tool_name: item.tool_name,
+  };
+  const rawEdits = Array.isArray((item.arguments as { edits?: unknown }).edits)
+    ? ((item.arguments as { edits: unknown[] }).edits as Record<string, unknown>[])
+    : [];
+  const edits: EditInput[] = rawEdits.map((e) => ({
+    find: String(e.find ?? ""),
+    replace: String(e.replace ?? ""),
+    context_before: String(e.context_before ?? ""),
+    context_after: String(e.context_after ?? ""),
+    reason: e.reason ? String(e.reason) : undefined,
+  }));
+  if (!edits.length) {
+    return {
+      content: JSON.stringify({ ok: false, error: "No edits to apply." }),
+      event: { ...baseEvent, status: "error", error: "No edits to apply." },
+    };
+  }
+  const result = await applyTrackedEditsToDocument({
+    documentId: item.binding.document_id,
+    userId,
+    // See module comment on runApprovedConnectorActions: no caller passes an
+    // email through this path, so only creator/organization document access
+    // applies here, not an email-direct grant.
+    userEmail: null,
+    edits,
+    db,
+  });
+  if (!result.ok) {
+    return {
+      content: JSON.stringify({ ok: false, error: result.error }),
+      event: { ...baseEvent, status: "error", error: result.error },
+    };
+  }
+  return {
+    content: JSON.stringify({
+      ok: true,
+      document_id: item.binding.document_id,
+      version_id: result.version_id,
+      version_number: result.version_number,
+      download_url: result.download_url,
+      applied: result.annotations.length,
+      errors: result.errors,
+    }),
+    event: { ...baseEvent, status: "ok" },
+  };
 }
 
 /**
@@ -131,7 +207,15 @@ export async function runApprovedConnectorActions(args: {
   for (const item of ask.items.filter(isApprovalItem)) {
     if (!approved.has(item.id)) continue;
     const { content: result, event } =
-      item.binding.type === "google"
+      item.binding.type === "document_edit"
+        ? await executeApprovedDocumentEdit(
+            item as ConnectorApprovalItem & {
+              binding: Extract<ConnectorApprovalItem["binding"], { type: "document_edit" }>;
+            },
+            userId,
+            db,
+          )
+        : item.binding.type === "google"
         ? item.binding.provider === "google-drive"
           ? await executeApprovedGoogleDriveCall(owner, item, db)
           : await executeApprovedGoogleWorkspaceCall(owner, item, db)

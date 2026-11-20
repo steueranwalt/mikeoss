@@ -54,6 +54,8 @@ const enrichedFields = {
   page_count: activeVersion.page_count,
   textless_page_count: activeVersion.textless_page_count,
   content_sha256: activeVersion.content_sha256,
+  // Gate B4 audit finding L4.
+  ai_draft: false,
 };
 // Dev drift: Dev mounts the projects/library routers under /api/....
 const paths = [

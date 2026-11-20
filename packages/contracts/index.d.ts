@@ -154,6 +154,16 @@ export type ConnectorApprovalBinding =
       provider: GoogleWorkspaceProvider | "google-drive";
       grant_id: string;
       etag?: string;
+    }
+  | {
+      /**
+       * Gate B4 audit finding L4: edit_document (and any tool overwriting an
+       * existing document's content) pauses for approval the same way a
+       * connector write does, instead of applying tracked changes inline.
+       */
+      type: "document_edit";
+      document_id: string;
+      client_doc_id: string;
     };
 
 export type AskInputsEvent = {
