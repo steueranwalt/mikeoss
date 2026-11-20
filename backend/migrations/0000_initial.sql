@@ -1,9 +1,3 @@
-<<<<<<<< HEAD:backend/schema.sql
--- Mike Supabase schema
--- Based on supabase-migration.sql plus the later backend/migrations/*.sql files.
--- Use this for a fresh Supabase database. Existing deployments should continue
--- to apply the incremental migration files instead.
-========
 -- Mike initial schema for Azure Database for PostgreSQL Flexible Server
 --
 -- Ported from 000_one_shot_schema.sql with all Supabase-specific items removed:
@@ -20,7 +14,6 @@
 -- TODO(entraid): handle_new_user() trigger and on_auth_user_created removed.
 --   Profile creation is now an application-level upsert in the backend.
 --   See 011-user-bootstrap-and-profile-endpoints.md.
->>>>>>>> altien/main:backend/0000_initial.sql
 
 create extension if not exists "pgcrypto";
 
@@ -47,14 +40,11 @@ create table if not exists public.user_profiles (
   -- login gate). Dev did not adopt app-level Supabase MFA — Entra enforces
   -- MFA at the IdP (Conditional Access) — so the column is skipped.
   tabular_model text not null default 'gemini-3-flash-preview',
-<<<<<<<< HEAD:backend/schema.sql
-========
   claude_api_key text,
   gemini_api_key text,
   -- Features > Legal Research > Jurisdiction > US toggle (upstream 1fa0554;
   -- also in 0009 for existing databases).
   legal_research_us boolean not null default true,
->>>>>>>> altien/main:backend/0000_initial.sql
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -62,29 +52,6 @@ create table if not exists public.user_profiles (
 create index if not exists idx_user_profiles_user
   on public.user_profiles(user_id);
 
-<<<<<<<< HEAD:backend/schema.sql
-create or replace function public.handle_new_user()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  insert into public.user_profiles (user_id)
-  values (new.id)
-  on conflict (user_id) do nothing;
-  return new;
-exception when others then
-  -- Never block signup if the profile insert fails.
-  return new;
-end;
-$$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute procedure public.handle_new_user();
-========
 -- TODO(entraid): RLS removed.
 --   Original policies:
 --     create policy "Users can view their own profile" on public.user_profiles
@@ -98,22 +65,6 @@ create trigger on_auth_user_created
 --   Replacement: upsertUserProfile() in the backend auth middleware.
 -- (user_api_keys lives in 0006_user_api_keys.sql — upstream inlines it
 -- here; dev keeps it in its own numbered migration.)
->>>>>>>> altien/main:backend/0000_initial.sql
-
-create table if not exists public.user_api_keys (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
-  provider text not null check (provider in ('claude', 'gemini', 'openai')),
-  encrypted_key text not null,
-  iv text not null,
-  auth_tag text not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique(user_id, provider)
-);
-
-create index if not exists idx_user_api_keys_user
-  on public.user_api_keys(user_id);
 
 -- ---------------------------------------------------------------------------
 -- Projects and documents
@@ -414,32 +365,6 @@ create index if not exists tabular_review_chat_messages_chat_idx
   on public.tabular_review_chat_messages(chat_id, created_at);
 
 -- ---------------------------------------------------------------------------
-<<<<<<<< HEAD:backend/schema.sql
--- Direct client grant hardening
--- ---------------------------------------------------------------------------
---
--- The frontend uses Supabase directly only for authentication. Application
--- data access goes through the backend API with the service role after the
--- backend verifies the user's JWT. Do not grant the browser anon/authenticated
--- roles direct table privileges for backend-owned data.
-
-revoke all on public.user_profiles from anon, authenticated;
-revoke all on public.projects from anon, authenticated;
-revoke all on public.project_subfolders from anon, authenticated;
-revoke all on public.documents from anon, authenticated;
-revoke all on public.document_versions from anon, authenticated;
-revoke all on public.document_edits from anon, authenticated;
-revoke all on public.workflows from anon, authenticated;
-revoke all on public.hidden_workflows from anon, authenticated;
-revoke all on public.workflow_shares from anon, authenticated;
-revoke all on public.chats from anon, authenticated;
-revoke all on public.chat_messages from anon, authenticated;
-revoke all on public.tabular_reviews from anon, authenticated;
-revoke all on public.tabular_cells from anon, authenticated;
-revoke all on public.tabular_review_chats from anon, authenticated;
-revoke all on public.tabular_review_chat_messages from anon, authenticated;
-revoke all on public.user_api_keys from anon, authenticated;
-========
 -- CourtListener bulk-data indexes
 -- ---------------------------------------------------------------------------
 
@@ -477,4 +402,3 @@ create table if not exists public.courtlistener_opinion_cluster_index (
 -- (Upstream's "Direct client grant hardening" revoke section is omitted —
 -- dev's Azure Postgres has no Supabase anon/authenticated roles; see
 -- 0005_postgres_roles.sql for dev's role model.)
->>>>>>>> altien/main:backend/0000_initial.sql
