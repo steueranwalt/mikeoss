@@ -1,7 +1,8 @@
 // Read/serve paths for documents: inline display bytes, zip bundling, signed
 // download URLs, and the raw source bytes of a version.
 
-import { getSignedUrl, headFile } from "../../lib/storage";
+import { randomUUID } from "node:crypto";
+import { downloadFile, getSignedUrl, headFile, uploadFile } from "../../lib/storage";
 import {
     attachActiveVersionPaths,
     loadActiveVersion,
@@ -15,7 +16,13 @@ import {
 } from "../../lib/documentDisplay";
 import { downloadFilenameForVersion, type Db } from "./documents.shared";
 import { ensureDocumentAccess } from "./documents.access";
-import { hasPendingDocumentEdits } from "./documents.edits";
+import {
+    aiDraftConfirmationState,
+    checkAiDraftConfirmation,
+    type AiDraftConfirmationState,
+} from "./documents.edits";
+import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
+import { reportError } from "../../lib/observability/sentry";
 
 // ---------------------------------------------------------------------------
 // Display
@@ -136,6 +143,13 @@ export type ZipExportEntry = {
  * Returns entries only — the route streams the archive, because that loop is
  * an HTTP concern (it applies backpressure onto `res`).
  */
+/** One document the batch refused because it needed confirmation first (Gate B4 audit finding N4). */
+export type ZipExportConfirmationNeeded = {
+    document_id: string;
+    filename: string;
+    confirm_token: string;
+};
+
 export async function resolveZipExportDocuments(
     params: {
         documentIds: string[];
@@ -148,6 +162,14 @@ export async function resolveZipExportDocuments(
     | { ok: true; entries: ZipExportEntry[] }
     | { ok: false; kind: "limit"; detail: string }
     | { ok: false; kind: "not_found"; detail: string }
+    // Gate B4 audit finding N4: at least one requested document has
+    // unresolved tracked changes or an unapproved AI draft. Unlike the
+    // single-document routes, a batch has no single confirm_token to retry
+    // with — the caller drops these documents from the request or confirms
+    // each individually (e.g. via /url) before retrying the whole batch.
+    // Fail-closed: the rest of the batch is refused too, rather than silently
+    // shipping a zip with gaps.
+    | { ok: false; kind: "confirmation_required"; documents: ZipExportConfirmationNeeded[] }
     // Database and object-storage failures are opaque to the client: the
     // route hands the raw error to sendInternalError.
     | { ok: false; kind: "internal"; error: unknown }
@@ -320,6 +342,30 @@ export async function resolveZipExportDocuments(
     if (activeDocs.length === 0)
         return { ok: false, kind: "not_found", detail: "No files available" };
 
+    // Gate B4 audit finding N4: every output path checks this, including a
+    // batch export — a draft or edited document does not get a pass just
+    // because it arrived bundled with others.
+    const confirmationStates = await mapWithConcurrency(
+        activeDocs,
+        5,
+        async (doc) => ({ doc, state: await aiDraftConfirmationState(doc.id, db) }),
+    );
+    const needsConfirmation = confirmationStates.filter(
+        (entry): entry is { doc: (typeof activeDocs)[number]; state: AiDraftConfirmationState } =>
+            entry.state !== null,
+    );
+    if (needsConfirmation.length > 0) {
+        return {
+            ok: false,
+            kind: "confirmation_required",
+            documents: needsConfirmation.map(({ doc, state }) => ({
+                document_id: doc.id,
+                filename: doc.filename ?? doc.storage_path,
+                confirm_token: state.confirmToken,
+            })),
+        };
+    }
+
     // HEAD every object to learn the archive's total size before committing to
     // it; bounded concurrency keeps a large selection from opening one request
     // per document at once.
@@ -370,16 +416,26 @@ export async function resolveZipExportDocuments(
 // Signed download URL
 // ---------------------------------------------------------------------------
 
+// Gate B4 audit finding N6: a signed URL that needed confirmation points at
+// a throwaway stamped copy, never the original stored object — the
+// original never carries the banner, and nobody holding this URL ever sees
+// it without one.
+const STAMPED_COPY_TTL_SECONDS = 600;
+
 export async function getDownloadUrl(
     documentId: string,
     userId: string,
     userEmail: string | undefined,
     versionIdParam: string | null,
     db: Db,
+    /** Gate B4 audit finding N5: the caller's confirm_token, if it sent one. */
+    confirmToken?: string,
 ): Promise<
     | { ok: true; payload: Record<string, unknown> }
     | { ok: false; kind: "not_found"; detail: string }
     | { ok: false; kind: "storage"; detail: string }
+    | { ok: false; kind: "confirmation_required"; state: AiDraftConfirmationState }
+    | { ok: false; kind: "stamping_failed"; detail: string }
 > {
     const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
     if (!access.ok)
@@ -394,7 +450,43 @@ export async function getDownloadUrl(
         active.version_number,
         active.source === "assistant_edit",
     );
-    const url = await getSignedUrl(active.storage_path, 3600, downloadFilename);
+
+    // One read decides both: whether confirmation is required at all, and
+    // (if the caller is confirmed) whether there is anything left to stamp.
+    const draftState = await aiDraftConfirmationState(documentId, db);
+    if (draftState && confirmToken !== draftState.confirmToken) {
+        return { ok: false, kind: "confirmation_required", state: draftState };
+    }
+
+    let signedStoragePath = active.storage_path;
+    if (draftState && active.file_type === "docx") {
+        // Gate B4 audit finding N6: fail-closed, not fail-open — a docx that
+        // needed confirmation and cannot be stamped is refused outright
+        // (stamping_failed) rather than silently handed out as the
+        // original, unstamped object. A docx that did not need confirmation
+        // (draftState null: no pending edits, not an AI draft) is untouched.
+        try {
+            const original = await downloadFile(active.storage_path);
+            if (!original) throw new Error("source bytes unavailable");
+            const stamped = await stampAiDraftWatermark(Buffer.from(original));
+            signedStoragePath = `exports/ai-draft-stamped/${documentId}/${randomUUID()}.docx`;
+            await uploadFile(
+                signedStoragePath,
+                stamped.buffer.slice(stamped.byteOffset, stamped.byteOffset + stamped.byteLength) as ArrayBuffer,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            );
+        } catch (error) {
+            reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp" } });
+            return {
+                ok: false,
+                kind: "stamping_failed",
+                detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+            };
+        }
+    }
+
+    const ttl = signedStoragePath === active.storage_path ? 3600 : STAMPED_COPY_TTL_SECONDS;
+    const url = await getSignedUrl(signedStoragePath, ttl, downloadFilename);
     if (!url)
         return { ok: false, kind: "storage", detail: "Storage not configured" };
 
@@ -429,6 +521,8 @@ export async function getFileStreamSource(
     userEmail: string | undefined,
     versionIdParam: string | null,
     db: Db,
+    /** Gate B4 audit finding N5: the caller's confirm_token, if it sent one. */
+    confirmToken?: string,
 ): Promise<
     | {
           ok: true;
@@ -436,8 +530,8 @@ export async function getFileStreamSource(
           fileType: string | null;
           size: number;
           filename: string;
-          /** Gate B4 audit finding L3: see hasPendingDocumentEdits. */
-          hasPendingEdits: boolean;
+          /** Gate B4 audit finding N4/N5: see checkAiDraftConfirmation. */
+          confirmation: Awaited<ReturnType<typeof checkAiDraftConfirmation>>;
       }
     | { ok: false; detail: string }
 > {
@@ -459,6 +553,6 @@ export async function getFileStreamSource(
             active.version_number,
             active.source === "assistant_edit",
         ),
-        hasPendingEdits: await hasPendingDocumentEdits(documentId, db),
+        confirmation: await checkAiDraftConfirmation(documentId, confirmToken, db),
     };
 }

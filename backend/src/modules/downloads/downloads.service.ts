@@ -28,6 +28,11 @@ import {
     contentTypeForDocumentType,
     documentSuffix,
 } from "../../lib/documentTypes";
+import {
+    requireAiDraftConfirmationOrRespond409,
+    aiDraftConfirmationResponseBody,
+} from "../documents/documents.service";
+import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
 
 function contentTypeFor(filename: string): string {
     return contentTypeForDocumentType(documentSuffix(filename));
@@ -91,37 +96,86 @@ export async function storeBlobUpload(args: {
  * storage path is still backed by a live document version the caller can
  * access. Every failure after token verification collapses to "not_found" so
  * a valid-looking token cannot be used to probe for foreign files.
+ *
+ * Gate B4 audit finding N4: these tokens never expire by design (persistent
+ * links stored in chat history), so an AI-draft/unresolved-edit document is
+ * re-checked on every redemption instead — the same `confirm_token` gate as
+ * `/file` and `/url`, keyed off the live document state, not the token's mint
+ * time. A confirmed .docx is stamped before it is served (fail-closed: a
+ * stamping failure refuses the download rather than serving it unstamped).
  */
 export async function resolveTokenDownload(
     db: Db,
-    args: { token: string; userId: string; userEmail: string | undefined },
+    args: {
+        token: string;
+        userId: string;
+        userEmail: string | undefined;
+        confirmToken?: string;
+    },
 ): Promise<
     | { ok: true; bytes: Buffer; contentType: string; filename: string }
     | { ok: false; kind: "invalid_link" | "not_found" }
+    | {
+          ok: false;
+          kind: "confirmation_required";
+          body: ReturnType<typeof aiDraftConfirmationResponseBody>;
+      }
+    | { ok: false; kind: "stamping_failed"; detail: string }
 > {
     const info = verifyDownload(args.token);
     if (!info) return { ok: false, kind: "invalid_link" };
 
     const { data: version } = await db
         .from("document_versions")
-        .select("id, document_id")
+        .select("id, document_id, file_type")
         .eq("storage_path", info.path)
         .is("deleted_at", null)
         .maybeSingle();
     if (!version) return { ok: false, kind: "not_found" };
+    const { document_id: documentId, file_type: fileType } = version as {
+        document_id: string;
+        file_type: string | null;
+    };
 
     const { data: doc } = await db
         .from("documents")
         .select("id, user_id, project_id, org_id, workflow_id")
-        .eq("id", (version as { document_id: string }).document_id)
+        .eq("id", documentId)
         .single();
     if (!doc) return { ok: false, kind: "not_found" };
 
     const access = await ensureDocAccess(doc, args.userId, args.userEmail, db);
     if (!access.ok) return { ok: false, kind: "not_found" };
 
+    const confirmation = await requireAiDraftConfirmationOrRespond409(
+        documentId,
+        args.confirmToken,
+        db,
+    );
+    if (!confirmation.proceed) {
+        return { ok: false, kind: "confirmation_required", body: confirmation.body };
+    }
+
     const raw = await downloadFile(info.path);
     if (!raw) return { ok: false, kind: "not_found" };
+
+    if (confirmation.state && fileType === "docx") {
+        try {
+            const stamped = await stampAiDraftWatermark(Buffer.from(raw));
+            return {
+                ok: true,
+                bytes: stamped,
+                contentType: contentTypeFor(info.filename),
+                filename: info.filename,
+            };
+        } catch {
+            return {
+                ok: false,
+                kind: "stamping_failed",
+                detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+            };
+        }
+    }
 
     return {
         ok: true,

@@ -42,7 +42,11 @@ export {
 
 export {
     resolveEdit,
-    hasPendingDocumentEdits,
+    checkAiDraftConfirmation,
+    aiDraftConfirmationState,
+    aiDraftConfirmationResponseBody,
+    requireAiDraftConfirmationOrRespond409,
+    type AiDraftConfirmationState,
 } from "./documents.edits";
 
 export {

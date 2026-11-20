@@ -11,15 +11,15 @@ const mocks = vi.hoisted(() => ({
   loadActiveVersion: vi.fn(),
 }));
 
-// Gate B4 audit finding L3: how many pending document_edits rows the
-// hasPendingDocumentEdits count-query sees. 0 by default (every pre-existing
-// test in this file expects the unconfirmed-download path to be unaffected).
+// Gate B4 audit finding N5: how many pending document_edits rows
+// aiDraftConfirmationState sees. 0 by default (every pre-existing test in
+// this file expects the unconfirmed-download path to be unaffected).
 let pendingEditsCount = 0;
 
 const database = {
   from: vi.fn((table: string) => {
     const query: Record<string, unknown> = {};
-    for (const method of ["select", "eq"]) {
+    for (const method of ["select", "eq", "order"]) {
       query[method] = vi.fn(() => query);
     }
     query.single = vi.fn(async () => ({
@@ -33,12 +33,14 @@ const database = {
       error: null,
     }));
     if (table === "document_edits") {
-      // hasPendingDocumentEdits never calls .single(); it awaits the
-      // select/eq chain itself and reads { count } off the result.
+      // aiDraftConfirmationState never calls .single(); it awaits the
+      // select/eq/order chain itself and reads the pending edit id rows
+      // off { data }.
+      const rows = Array.from({ length: pendingEditsCount }, (_, i) => ({
+        id: `edit-${i + 1}`,
+      }));
       query.then = (resolve: (value: unknown) => unknown) =>
-        Promise.resolve({ count: pendingEditsCount, error: null }).then(
-          resolve,
-        );
+        Promise.resolve({ data: rows, error: null }).then(resolve);
     }
     return query;
   }),
@@ -221,8 +223,17 @@ describe("GET /single-documents/:documentId/file", () => {
       const original = await zip.generateAsync({ type: "arraybuffer" });
       mocks.downloadFile.mockResolvedValue(original);
 
+      // Gate B4 audit finding N5: the confirm_token comes from the 409
+      // itself — it is not a value the client can guess or hardcode.
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      expect(refusal.status).toBe(409);
+      const confirmToken = refusal.body.confirm_token as string;
+      expect(confirmToken).toMatch(/^[0-9a-f]{64}$/);
+
       const response = await request(app)
-        .get("/single-documents/document-1/file?confirm_ai_draft=1")
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
         .set("Authorization", "Bearer test")
         .buffer(true)
         .parse((res, callback) => {
@@ -240,6 +251,42 @@ describe("GET /single-documents/:documentId/file", () => {
       const xml = await stampedZip.file("word/document.xml")!.async("string");
       expect(xml).toContain("KI-ENTWURF");
       expect(xml).toContain("Original.");
+    });
+
+    // Gate B4 audit finding N5: a stale token must not be replayable once
+    // the document's pending-edit set changes.
+    it("rejects a confirm_token computed before a new pending edit landed", async () => {
+      const before = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      const staleToken = before.body.confirm_token as string;
+
+      pendingEditsCount = 2; // a second edit landed
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${staleToken}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.confirm_token).not.toBe(staleToken);
+    });
+
+    // Gate B4 audit finding N6: fail-closed, not fail-open.
+    it("refuses with 409 rather than serving unstamped when stamping fails", async () => {
+      mocks.downloadFile.mockResolvedValue(null); // stampAiDraftWatermark never gets bytes
+
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      const confirmToken = refusal.body.confirm_token as string;
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("stamping_failed");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
     });
 
     it("downloads unchanged once no changes are pending", async () => {

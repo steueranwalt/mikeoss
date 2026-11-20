@@ -12,7 +12,7 @@ import { requireAuth } from "../../middleware/auth";
 import { asyncRoute, routerErrorHandler } from "../../middleware/asyncRoute";
 import { createServerSupabase } from "../../lib/supabase";
 import { sendInternalError } from "../../lib/httpError";
-import { setOperation } from "../../lib/observability/sentry";
+import { reportError, setOperation } from "../../lib/observability/sentry";
 import { buildContentDisposition, createFileReadStream, downloadFile } from "../../lib/storage";
 import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
 import { sendDocumentDisplay } from "../../lib/documentDisplay";
@@ -31,7 +31,7 @@ import {
     deleteVersion,
     approveAiDraftVersion,
     resolveEdit,
-    hasPendingDocumentEdits,
+    aiDraftConfirmationResponseBody,
 } from "./documents.service";
 
 export const documentsRouter = Router();
@@ -110,19 +110,25 @@ documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, 
 // The service locates and sizes the object; the stream is opened here so
 // `res` is what applies backpressure to the object-storage read.
 //
-// Gate B4 audit finding L3: a document with unresolved AI-proposed tracked
-// changes (document_edits.status='pending') refuses the download with 409
-// unless the caller explicitly confirms it wants the draft anyway
-// (?confirm_ai_draft=1). A confirmed .docx download is then served with a
-// visible "AI draft, not approved" banner stamped in, so the file itself
-// carries the warning wherever it ends up — not just this response. Without
-// any pending edit, the download is unchanged.
+// Gate B4 audit findings L3/N4/N5/N6: a document with unresolved AI-proposed
+// tracked changes or an unapproved AI draft version refuses the download
+// with 409 unless the caller's ?confirm_token matches the document's
+// current pending-edits/draft state exactly (not a blanket
+// ?confirm_ai_draft=1 — a stale token from before the document changed is
+// rejected the same as no token at all). A confirmed .docx download is then
+// served with a visible "AI draft, not approved" banner stamped in, so the
+// file itself carries the warning wherever it ends up — not just this
+// response. A docx that cannot be stamped is refused with 409 rather than
+// served unstamped (fail-closed). Without anything to confirm, the download
+// is unchanged.
 documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
     const versionIdParam =
         typeof req.query.version_id === "string" ? req.query.version_id : null;
+    const confirmToken =
+        typeof req.query.confirm_token === "string" ? req.query.confirm_token : undefined;
     const db = createServerSupabase();
 
     const result = await getFileStreamSource(
@@ -131,18 +137,44 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
         userEmail,
         versionIdParam,
         db,
+        confirmToken,
     );
     if (!result.ok)
         return void res.status(404).json({ detail: result.detail });
 
-    if (result.hasPendingEdits && req.query.confirm_ai_draft !== "1") {
-        return void res.status(409).json({
-            code: "unresolved_ai_edits",
-            detail:
-                "This document has AI-proposed changes that have not been accepted or rejected yet. " +
-                "Confirm the download with ?confirm_ai_draft=1 to get it anyway, marked as an AI draft, " +
-                "or resolve the pending changes first.",
-        });
+    if (!result.confirmation.ok) {
+        return void res.status(409).json(aiDraftConfirmationResponseBody(result.confirmation.state));
+    }
+
+    if (result.confirmation.state && result.fileType === "docx") {
+        // Watermarking needs the whole file to parse and rewrite the zip, so
+        // this path cannot stream: it reads the object fully, stamps it, and
+        // sends the result. A confirmed non-docx keeps streaming below —
+        // there is no stamping capability for other formats. Headers for the
+        // file response are set only once stamping actually succeeds — set
+        // any earlier and a failed `res.json()` below would inherit this
+        // Content-Type instead of "application/json".
+        let stamped: Buffer;
+        try {
+            const bytes = await downloadFile(result.storagePath);
+            if (!bytes) throw new Error("source bytes unavailable");
+            stamped = await stampAiDraftWatermark(Buffer.from(bytes));
+        } catch (error) {
+            reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp" } });
+            // Gate B4 audit finding N6: fail-closed — never fall through to
+            // the unstamped stream below.
+            return void res.status(409).json({
+                code: "stamping_failed",
+                detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+            });
+        }
+        res.setHeader("Content-Type", contentTypeForDocumentType(result.fileType));
+        res.setHeader(
+            "Content-Disposition",
+            buildContentDisposition("inline", result.filename),
+        );
+        res.setHeader("Content-Length", stamped.byteLength);
+        return void res.send(stamped);
     }
 
     res.setHeader("Content-Type", contentTypeForDocumentType(result.fileType));
@@ -150,19 +182,6 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
         "Content-Disposition",
         buildContentDisposition("inline", result.filename),
     );
-
-    if (result.hasPendingEdits && result.fileType === "docx") {
-        // Watermarking needs the whole file to parse and rewrite the zip, so
-        // this path cannot stream: it reads the object fully, stamps it, and
-        // sends the result. Every other download (no pending edits, or a
-        // pending-edit file this module cannot stamp) keeps streaming below.
-        const bytes = await downloadFile(result.storagePath);
-        if (!bytes) return void res.status(404).json({ detail: "Document bytes not available" });
-        const stamped = await stampAiDraftWatermark(Buffer.from(bytes));
-        res.setHeader("Content-Length", stamped.byteLength);
-        return void res.send(stamped);
-    }
-
     res.setHeader("Content-Length", result.size);
     const source = createFileReadStream(result.storagePath);
     try {
@@ -207,6 +226,15 @@ documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) =
     if (!result.ok) {
         if (result.kind === "internal")
             return void sendInternalError(res, result.error);
+        if (result.kind === "confirmation_required")
+            return void res.status(409).json({
+                code: "unresolved_ai_edits",
+                detail:
+                    "One or more selected documents have AI-proposed changes or an unapproved " +
+                    "AI draft that has not been confirmed yet. Remove them from the selection or " +
+                    "confirm each one individually before retrying.",
+                documents: result.documents,
+            });
         const status = result.kind === "limit" ? 413 : 404;
         return void res.status(status).json({ detail: result.detail });
     }
@@ -251,31 +279,23 @@ documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) =
 // Optional ?version_id= selects a specific tracked-changes version.
 // Otherwise falls back to documents.current_version_id, else the original upload.
 //
-// Gate B4 audit finding L3: same confirmation gate as /file (409 without
-// ?confirm_ai_draft=1 while changes are pending). This route hands back a
-// signed URL pointing straight at the stored object, so unlike /file it
-// cannot stamp the AI-draft banner into what the signed URL serves — callers
-// that need the visible banner must use /file instead.
+// Gate B4 audit findings L3/N5/N6: same confirm_token gate as /file. Unlike
+// /file this route hands back a signed URL rather than bytes it controls
+// directly — so, fail-closed rather than fail-open, a confirmed .docx is
+// stamped into a throwaway copy FIRST and only that copy is ever signed; the
+// original object is never the target of a signed URL once confirmation was
+// required. A docx that cannot be stamped is refused with 409, never served
+// unstamped. A confirmed non-docx (no stamping capability at all) signs the
+// original, same as an unconfirmed download needs no stamping either.
 documentsRouter.get("/:documentId/url", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
     const versionIdParam =
         typeof req.query.version_id === "string" ? req.query.version_id : null;
+    const confirmToken =
+        typeof req.query.confirm_token === "string" ? req.query.confirm_token : undefined;
     const db = createServerSupabase();
-
-    if (
-        req.query.confirm_ai_draft !== "1" &&
-        (await hasPendingDocumentEdits(documentId, db))
-    ) {
-        return void res.status(409).json({
-            code: "unresolved_ai_edits",
-            detail:
-                "This document has AI-proposed changes that have not been accepted or rejected yet. " +
-                "Confirm the download with ?confirm_ai_draft=1 to get it anyway, or resolve the " +
-                "pending changes first.",
-        });
-    }
 
     const result = await getDownloadUrl(
         documentId,
@@ -283,8 +303,15 @@ documentsRouter.get("/:documentId/url", requireAuth, asyncRoute(async (req, res)
         userEmail,
         versionIdParam,
         db,
+        confirmToken,
     );
     if (!result.ok) {
+        if (result.kind === "confirmation_required") {
+            return void res.status(409).json(aiDraftConfirmationResponseBody(result.state));
+        }
+        if (result.kind === "stamping_failed") {
+            return void res.status(409).json({ code: "stamping_failed", detail: result.detail });
+        }
         const status = result.kind === "storage" ? 503 : 404;
         return void res.status(status).json({ detail: result.detail });
     }

@@ -501,7 +501,11 @@ export async function buildProjectExportManifest(db: Db, projectId: string) {
                           .in("document_id", documentIds)
                           .order("created_at", { ascending: true })
                           .order("id", { ascending: true }),
-                  "id, document_id, version_number, source, filename, file_type, size_bytes, content_sha256, deleted_at, created_at",
+                  // Gate B4 audit finding N7: ai_draft is part of a
+                  // version's durable, exportable identity, the same as its
+                  // source or filename — an export of an AI-drafted,
+                  // never-approved document should say so.
+                  "id, document_id, version_number, source, filename, file_type, size_bytes, content_sha256, deleted_at, created_at, ai_draft",
               ),
         documentIds.length === 0
             ? Promise.resolve([])
@@ -550,6 +554,8 @@ export async function buildProjectExportManifest(db: Db, projectId: string) {
                 content_sha256: v.content_sha256,
                 deleted_at: v.deleted_at,
                 created_at: v.created_at,
+                // Gate B4 audit finding N7.
+                ai_draft: v.ai_draft === true,
             })),
             edits: (editsByDoc.get(doc.id as string) ?? []).map((e) => ({
                 id: e.id,
