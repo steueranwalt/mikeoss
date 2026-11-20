@@ -204,11 +204,13 @@ export interface WordTrackedEditsController {
   acceptAndApplyEdit: (key: string) => Promise<void>;
 }
 
+// Gate B4 audit finding N13: narrowed alongside wordChatSettings.ts's
+// WordEditApplyMode — "direct" cannot be constructed anywhere anymore.
 export type PersistWordDocumentEdit = (
   messageId: string,
   blockIndex: number,
   edit: RedlineEdit,
-  applyMode: "direct" | "approval",
+  applyMode: "approval",
 ) => Promise<WordDocumentEdit>;
 
 export interface PersistedWordEditPatch {

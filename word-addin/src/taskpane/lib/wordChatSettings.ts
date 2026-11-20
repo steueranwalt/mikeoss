@@ -8,19 +8,22 @@ import type { WordChatStorageMode } from "./wordChatTypes";
 export type { WordChatStorageMode };
 
 /**
- * How model-proposed edits reach the document.
+ * How model-proposed edits reach the document. Always `"approval"`:
+ * validate and preview each edit before the user applies it.
  *
- * - `approval`: validate and preview each edit before the user applies it.
- * - `direct`: apply each streamed edit immediately as a pending tracked
- *   change. Applied edits remain available for acceptance or rejection.
- *
- * Gate B4: `direct` is retained only as a type — `useWordEditApplyMode`
- * below never returns it and ignores any attempt to set it. Every Word edit
- * is reviewed before it reaches the document, and this is not a user
- * setting. See EditApplyModeMenu.tsx, which no longer offers `direct` as a
- * choice.
+ * Gate B4 audit finding N13: `"direct"` (apply each streamed edit
+ * immediately as a pending tracked change, skipping review) used to be
+ * retained as a type value even though nothing could construct it anymore
+ * (`useWordEditApplyMode` below never returns it, and `scheduleDirectEdit` —
+ * the function that used to build on it — was removed). A type that still
+ * names a capability the application no longer has is itself a liability:
+ * it is one incautious change away from becoming constructible again
+ * without the type system raising an error anywhere. This type is a single
+ * literal rather than a union for the same reason connectorSettingsPatch
+ * silently drops requireWriteApproval instead of validating it — the value
+ * cannot exist, not merely "is validated to be approval".
  */
-export type WordEditApplyMode = "approval" | "direct";
+export type WordEditApplyMode = "approval";
 
 const STORAGE_KEY = "mike_word_chat_storage_mode";
 

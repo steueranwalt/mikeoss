@@ -560,7 +560,12 @@ export type AssistantEvent =
 
 export type AssistantErrorCode = "invalid_api_key";
 
-export type WordEditApplyMode = "direct" | "approval";
+// Gate B4 audit finding N13: "direct" (apply without review) removed from
+// the type — nothing in the application can construct it anymore
+// (parseEditApplyMode in wordChat.routes.ts rejects it, and word-addin's
+// own WordEditApplyMode narrowed the same way), so the shared contract no
+// longer names a capability that does not exist.
+export type WordEditApplyMode = "approval";
 
 export interface WordDocumentEdit {
   id: string;
