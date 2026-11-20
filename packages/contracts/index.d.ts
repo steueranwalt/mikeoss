@@ -157,13 +157,32 @@ export type ConnectorApprovalBinding =
     }
   | {
       /**
-       * Gate B4 audit finding L4: edit_document (and any tool overwriting an
-       * existing document's content) pauses for approval the same way a
-       * connector write does, instead of applying tracked changes inline.
+       * Gate B4 audit finding L4: edit_document pauses for approval the
+       * same way a connector write does, instead of applying tracked
+       * changes inline.
        */
       type: "document_edit";
       document_id: string;
       client_doc_id: string;
+      /**
+       * Gate B4 audit finding N13: the document's active version at the
+       * moment the approval was requested, not just the document id — a
+       * stale-review guard. Absent on legacy approvals requested before this
+       * field existed, which must be reviewed again rather than applied
+       * against whatever is current now.
+       */
+      version_id?: string;
+      storage_path?: string;
+    }
+  | {
+      /**
+       * Gate B4 audit finding N11: write_project_document overwriting a
+       * document it already wrote (a new version of an existing one, not a
+       * brand-new document) pauses for approval the same way edit_document
+       * does.
+       */
+      type: "document_overwrite";
+      document_id: string;
     };
 
 export type AskInputsEvent = {

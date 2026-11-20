@@ -233,6 +233,9 @@ describe("workflow asset replication", () => {
             filename: "Client precedent.pdf",
             file_type: "pdf",
             source: "upload",
+            // Gate B4 audit finding N8: a replicated copy is marked an AI
+            // draft, the same as any other model-created document.
+            ai_draft: true,
         });
         expect(index["doc-0"]).toMatchObject({
             document_id: documentId,

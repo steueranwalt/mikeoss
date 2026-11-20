@@ -38,6 +38,7 @@ import {
 import { TOOL_ERROR_MESSAGE } from "../types";
 import { applyTrackedEditsToDocument } from "../../../documents/documents.service";
 import type { EditInput } from "../../../../lib/docxTrackedChanges";
+import { writeProjectDocument } from "./projectDocumentWrites";
 
 /** Tool output replayed to the model after an approved call, per call. */
 export const MAX_APPROVAL_RESULT_CHARS = 4_000;
@@ -64,6 +65,54 @@ function isApprovalItem(
   item: AskInputsEvent["items"][number],
 ): item is ConnectorApprovalItem {
   return item.kind === "approval";
+}
+
+/**
+ * Gate B4 audit finding N11: runs an approved write_project_document
+ * overwrite, replaying the exact filename/content the user reviewed.
+ * Nothing changes about the existing document until this runs.
+ */
+async function executeApprovedDocumentOverwrite(
+  item: ConnectorApprovalItem & {
+    binding: Extract<ConnectorApprovalItem["binding"], { type: "document_overwrite" }>;
+  },
+  userId: string,
+  db: Db,
+): Promise<{ content: string; event: McpToolEvent }> {
+  const baseEvent = {
+    type: "mcp_tool_call" as const,
+    connector_id: "",
+    connector_name: item.connector_name,
+    tool_name: item.tool_name,
+    openai_tool_name: item.tool_name,
+  };
+  const args = item.arguments as { filename?: unknown; content?: unknown; project_id?: unknown };
+  if (typeof args.filename !== "string" || typeof args.content !== "string") {
+    return {
+      content: JSON.stringify({ ok: false, error: "Invalid approval payload." }),
+      event: { ...baseEvent, status: "error", error: "Invalid approval payload." },
+    };
+  }
+  const result = await writeProjectDocument(
+    {
+      filename: args.filename,
+      content: args.content,
+      userId,
+      projectId: typeof args.project_id === "string" ? args.project_id : null,
+      approved: true,
+    },
+    db,
+  );
+  if (!result.ok) {
+    return {
+      content: JSON.stringify(result),
+      event: { ...baseEvent, status: "error", error: result.detail },
+    };
+  }
+  return {
+    content: JSON.stringify(result),
+    event: { ...baseEvent, status: "ok" },
+  };
 }
 
 /**
@@ -110,6 +159,16 @@ async function executeApprovedDocumentEdit(
       event: { ...baseEvent, status: "error", error: "No edits to apply." },
     };
   }
+  // Gate B4 audit finding N13: a legacy approval item requested before this
+  // field existed has no version to pin — reviewing it again, rather than
+  // guessing at "the current version", is the only safe option.
+  if (!item.binding.version_id || !item.binding.storage_path) {
+    const error = "This approval is from an older version of Mike and can no longer be applied. Ask the model to propose the edit again.";
+    return {
+      content: JSON.stringify({ ok: false, error }),
+      event: { ...baseEvent, status: "error", error },
+    };
+  }
   const result = await applyTrackedEditsToDocument({
     documentId: item.binding.document_id,
     userId,
@@ -119,6 +178,7 @@ async function executeApprovedDocumentEdit(
     userEmail: null,
     edits,
     db,
+    expectedVersion: { id: item.binding.version_id, storagePath: item.binding.storage_path },
   });
   if (!result.ok) {
     return {
@@ -211,6 +271,14 @@ export async function runApprovedConnectorActions(args: {
         ? await executeApprovedDocumentEdit(
             item as ConnectorApprovalItem & {
               binding: Extract<ConnectorApprovalItem["binding"], { type: "document_edit" }>;
+            },
+            userId,
+            db,
+          )
+        : item.binding.type === "document_overwrite"
+        ? await executeApprovedDocumentOverwrite(
+            item as ConnectorApprovalItem & {
+              binding: Extract<ConnectorApprovalItem["binding"], { type: "document_overwrite" }>;
             },
             userId,
             db,

@@ -57,10 +57,20 @@ export type WriteProjectDocumentRefusal = {
     | "invalid_filename"
     | "unsupported_file_type"
     | "content_too_large"
-    | "filename_conflict";
+    | "filename_conflict"
+    | "approval_required";
   detail: string;
   /** Present when another tool is the right way to produce this file. */
   use_instead?: string;
+  /**
+   * Gate B4 audit finding N11: present only on an "approval_required"
+   * refusal — the caller already-validated write to replay once the user
+   * approves it (connectorApprovals.ts's executeApprovedDocumentOverwrite).
+   */
+  pending_overwrite?: {
+    document_id: string;
+    client_doc_id?: string;
+  };
 };
 
 export type WriteProjectDocumentResult =
@@ -193,6 +203,14 @@ export async function writeProjectDocument(
     content: string;
     userId: string;
     projectId?: string | null;
+    /**
+     * Gate B4 audit finding N11: true only when the caller is replaying an
+     * already-approved overwrite (connectorApprovals.ts's
+     * executeApprovedDocumentOverwrite) — never set by the assistant tool
+     * dispatch itself. A brand-new document (no existing same-named
+     * tool_write document) never needs this: only overwriting one does.
+     */
+    approved?: boolean;
   },
   db: Db = createServerSupabase(),
 ): Promise<WriteProjectDocumentResult> {
@@ -237,6 +255,22 @@ export async function writeProjectDocument(
       "filename_conflict",
       `'${filename}' already exists in this project as ${description}. write_project_document only adds versions to documents it wrote itself; choose a different filename.`,
     );
+  }
+
+  // Gate B4 audit finding N11: overwriting a document that already exists
+  // (a new version of one write_project_document wrote before) needs the
+  // user's approval, the same as edit_document — only a brand-new document
+  // (no `existing` match) is created outright and merely marked an AI
+  // draft. All validation above (filename, file type, size, conflicting
+  // source) already ran, so what approval replays is exactly this
+  // already-checked write, never a fresh one.
+  if (existing && !input.approved) {
+    return {
+      ok: false,
+      error: "approval_required",
+      detail: `'${filename}' already exists in this project. Overwriting it needs the user's approval.`,
+      pending_overwrite: { document_id: existing.documentId },
+    };
   }
 
   const documentId = existing?.documentId ?? randomUUID();

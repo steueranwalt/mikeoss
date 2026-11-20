@@ -2019,32 +2019,52 @@ export async function runToolCalls(
           content: JSON.stringify({ error: APPROVAL_UNAVAILABLE_MESSAGE }),
         });
       } else {
-        // Gate B4 audit finding L4: edit_document pauses for the user's
-        // approval exactly like a connector write — nothing is applied to
-        // the document yet. Approval replays these exact, already-validated
-        // edits through executeApprovedDocumentEdit (connectorApprovals.ts).
-        approvalItems.push({
-          id: crypto.randomUUID(),
-          kind: "approval",
-          connector_name: docInfo.filename,
-          tool_name: "edit_document",
-          title: `Edit "${docInfo.filename}"`,
-          arguments: { doc_id: docId, edits: editsRaw },
-          binding: {
-            type: "document_edit",
-            document_id: indexed.document_id,
-            client_doc_id: docId,
-          },
-        });
-        toolResults.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          content: JSON.stringify({
-            ok: false,
-            status: "awaiting_approval",
-            message: "Waiting for the user's approval. Nothing has been changed yet.",
-          }),
-        });
+        // Gate B4 audit finding N13: the binding pins the active version
+        // this moment saw, not just the document id — a stale-review guard,
+        // not a hint. executeApprovedDocumentEdit (connectorApprovals.ts)
+        // passes it on as applyTrackedEditsToDocument's expectedVersion, so
+        // a version that moved on by approval time is refused the same way
+        // a long-running playbook review already is, instead of silently
+        // re-reading and editing whatever happens to be current then.
+        const activeVersionForEdit = await loadActiveVersion(indexed.document_id, db);
+        if (!activeVersionForEdit) {
+          const err = "Document has no file available to edit.";
+          emitEditError(docInfo.filename, indexed.document_id, err);
+          toolResults.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({ error: err }),
+          });
+        } else {
+          // Gate B4 audit finding L4: edit_document pauses for the user's
+          // approval exactly like a connector write — nothing is applied to
+          // the document yet. Approval replays these exact, already-
+          // validated edits through executeApprovedDocumentEdit.
+          approvalItems.push({
+            id: crypto.randomUUID(),
+            kind: "approval",
+            connector_name: docInfo.filename,
+            tool_name: "edit_document",
+            title: `Edit "${docInfo.filename}"`,
+            arguments: { doc_id: docId, edits: editsRaw },
+            binding: {
+              type: "document_edit",
+              document_id: indexed.document_id,
+              client_doc_id: docId,
+              version_id: activeVersionForEdit.id,
+              storage_path: activeVersionForEdit.storage_path,
+            },
+          });
+          toolResults.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({
+              ok: false,
+              status: "awaiting_approval",
+              message: "Waiting for the user's approval. Nothing has been changed yet.",
+            }),
+          });
+        }
       }
     } else if (tc.function.name === "replicate_document" && docIndex) {
       const rawDocId = args.doc_id as string;
@@ -2243,6 +2263,11 @@ export async function runToolCalls(
                 page_count: active?.page_count ?? null,
                 textless_page_count: active?.textless_page_count ?? null,
                 content_sha256: contentSha256(raw),
+                // Gate B4 audit finding N8: a replicated copy is a new,
+                // model-created document the same way generate_docx's or
+                // write_project_document's output is — mark it an AI draft
+                // until a human calls approve-draft.
+                ai_draft: true,
               }));
               const { data: insertedVersions, error: verErr } = await createDocumentVersions(db, versionRows);
               if (
@@ -2427,16 +2452,51 @@ export async function runToolCalls(
         "docx",
       );
     } else if (tc.function.name === "write_project_document") {
+      const writeFilename = args.filename as string;
+      const writeContent = args.content as string;
       const result = await writeProjectDocument(
         {
-          filename: args.filename as string,
-          content: args.content as string,
+          filename: writeFilename,
+          content: writeContent,
           userId,
           projectId: projectId ?? null,
         },
         db,
       );
-      if (!result.ok) {
+      if (!result.ok && result.error === "approval_required" && options.connectorApprovals) {
+        // Gate B4 audit finding N11: nothing is written yet — the approval
+        // item below replays this exact, already-validated filename/content
+        // through executeApprovedDocumentOverwrite once approved.
+        approvalItems.push({
+          id: crypto.randomUUID(),
+          kind: "approval",
+          connector_name: writeFilename,
+          tool_name: "write_project_document",
+          title: `Overwrite "${writeFilename}"`,
+          arguments: { filename: writeFilename, content: writeContent, project_id: projectId ?? null },
+          binding: {
+            type: "document_overwrite",
+            document_id: result.pending_overwrite?.document_id ?? "",
+          },
+        });
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            ok: false,
+            status: "awaiting_approval",
+            message: "Waiting for the user's approval. The existing document has not been changed yet.",
+          }),
+        });
+      } else if (!result.ok && result.error === "approval_required") {
+        // Surface's connectorApprovals is unavailable: same fallback as
+        // edit_document on a surface without an interactive approval UI.
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ ok: false, error: APPROVAL_UNAVAILABLE_MESSAGE }),
+        });
+      } else if (!result.ok) {
         // No document events on a refusal: nothing was written, and a
         // doc_created_start with no doc_created behind it leaves the UI
         // holding a card for a document that will never arrive.

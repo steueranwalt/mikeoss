@@ -8,6 +8,28 @@ vi.mock("../tools/documentOps", async (original) => ({
   runEditDocument,
 }));
 
+// Gate B4 audit finding N13: the approval binding now pins the active
+// version at request time, so edit_document's approval path reads it even
+// though it never applies anything inline. A loose, order-independent fake
+// (not scriptedDb's strict one) because two concurrent edit_document calls
+// each read it once, in an order this test does not control.
+function fakeActiveVersionDb(): Db {
+  return {
+    from: (table: string) => {
+      const builder: Record<string, unknown> = {
+        select: () => builder,
+        eq: () => builder,
+        is: () => builder,
+        single: async () =>
+          table === "documents"
+            ? { data: { current_version_id: "v1" }, error: null }
+            : { data: { id: "v1", document_id: "d1", storage_path: "doc-0-v1" }, error: null },
+      };
+      return builder;
+    },
+  } as never;
+}
+
 import { scriptedDb } from "../../../../__tests__/helpers/scriptedDb";
 import { createKeyedLock } from "../tools/documentLocks";
 import { getTurnReadIdentity } from "../tools/documentOps";
@@ -38,7 +60,7 @@ it("queues two concurrent edit_document calls as separate approvals instead of r
       ],
       docStore,
       "u1",
-      {} as Db,
+      fakeActiveVersionDb(),
       vi.fn(),
       undefined,
       undefined,
@@ -72,6 +94,8 @@ it("queues two concurrent edit_document calls as separate approvals instead of r
   expect(firstItem.binding).toMatchObject({
     type: "document_edit",
     document_id: "d1",
+    version_id: "v1",
+    storage_path: "doc-0-v1",
   });
   expect(firstItem.id).not.toBe(secondItem.id);
 });
