@@ -29,16 +29,80 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned to 22 to match every production Dockerfile (Dockerfile,
+      # word-addin/Dockerfile: `FROM node:22-slim`) — this was 24, a drift
+      # from what actually ships. That drift broke the extraction-isolation
+      # tests below in a way worth recording: isolated.ts's extractionCommand
+      # bounds each spawned parser with `prlimit --as=<memoryMb + 1GiB>`
+      # (hard OS address-space limit); under Node 24's V8, process startup
+      # itself needs more reserved (not necessarily resident) virtual address
+      # space than that, so every real extraction crashes immediately with a
+      # V8 "FatalOOM" during Isolate::Initialize — "extraction process exited
+      # without a result" here, reproduced locally the same way by running
+      # these two files under a Node 24 binary instead of 22. Node 22 (this
+      # pin) does not hit it, and it is also what production actually runs,
+      # so there is no related product-code change to make here — but it is
+      # a real, separate constraint that only grows if the Dockerfiles are
+      # ever moved off Node 22, not merely a CI quirk; see the report.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
-      - run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+          node-version: 22
+      # pnpm/action-setup installs the exact pinned version directly rather
+      # than asking corepack to resolve one: corepack has no package.json to
+      # read a version from at the workspace root (there is no root
+      # package.json — see the file header), so `corepack enable` alone can
+      # activate whatever pnpm release corepack currently defaults to, which
+      # then refuses to run once it notices backend/frontend/word-addin's own
+      # pinned `packageManager` field disagrees with it.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.1.2
       - run: pnpm install --frozen-lockfile
       # Upstream divergence (sync-log: e436b039): protocol fixture only.
       # The retired Supabase browser harness remains unsupported in Dev.
       - name: Anthropic fixture protocol contract
         run: node --test ../e2e/anthropic-stub.check.mjs
-      - run: pnpm run test:coverage
+      # Split off tests that spawn real, deliberately memory- and
+      # time-bounded child processes (parser isolation, zip-bomb
+      # decompression limits) plus the one test that walks and parses the
+      # whole backend/frontend/word-addin source trees. Run alongside ~400
+      # other files under this runner's default parallel worker count, their
+      # combined memory and CPU use was enough to make the child processes
+      # themselves fail to start ("extraction process exited without a
+      # result", a V8 startup OOM) and to push the source-tree walk past its
+      # timeout — not a bug in what they test, a resource contention problem.
+      # Running them serialized (`--maxWorkers=1`) on their own removes that
+      # contention without skipping or weakening any of them. Do NOT set
+      # NODE_OPTIONS=--max-old-space-size here: isolated.ts and
+      # processLimits.test.ts already deliberately start each child with a
+      # minimal, explicit env (no inherited NODE_OPTIONS, see isolated.ts's
+      # startParser) and its own `--max-old-space-size` sized from
+      # EXTRACTION_MAX_MEMORY_MB — a large heap ceiling on the *parent*
+      # process here left too little real memory for the parent to spawn
+      # those children at all on this runner (verified: it reproducibly
+      # turned every isolated.test.ts/processLimits.test.ts case into the
+      # same "exited without a result" / V8 startup OOM this split exists to
+      # fix, while the identical run with no NODE_OPTIONS override passes).
+      # `pnpm run test:coverage -- --exclude ...` does not work here: pnpm
+      # forwards a literal `--` ahead of the extra args, which vitest's own
+      # CLI then treats as "everything after this is a positional test-name
+      # filter", not flags — so `--exclude` would run as a literal filter
+      # string instead of the exclude flag. Calling vitest directly through
+      # `pnpm exec` avoids that extra `--` entirely.
+      - name: Unit tests (parallel)
+        run: >-
+          pnpm exec vitest run --coverage
+          --exclude "src/lib/extraction/__tests__/isolated.test.ts"
+          --exclude "src/lib/extraction/__tests__/processLimits.test.ts"
+          --exclude "src/altien/skills/archive.test.ts"
+          --exclude "src/__tests__/diagnosticVocabulary.test.ts"
+      - name: Unit tests (resource-heavy, serialized)
+        run: >-
+          pnpm exec vitest run --maxWorkers=1 --testTimeout=30000 --hookTimeout=30000
+          src/lib/extraction/__tests__/isolated.test.ts
+          src/lib/extraction/__tests__/processLimits.test.ts
+          src/altien/skills/archive.test.ts
+          src/__tests__/diagnosticVocabulary.test.ts
       - run: pnpm run build
 
       # `npm run build` (tsc -p tsconfig.json) deliberately excludes the test
@@ -62,11 +126,27 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Was 24; see the backend job's comment on the same change — pins to
+      # what every production Dockerfile actually runs.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
-      - run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+          node-version: 22
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.1.2
       - run: pnpm install --frozen-lockfile
+      # A few frontend test files (src/wordAddin/catalogParity.test.ts,
+      # localWordChatSaves.test.ts, operationReporting.test.tsx) import
+      # backend/ and word-addin/ source files by relative path to compare
+      # shared contracts across packages, so Vite's resolver needs those two
+      # packages' own node_modules on disk too — this is otherwise a fully
+      # isolated job with no root install (three independent pnpm lock
+      # trees; see this file's header). `--ignore-scripts` skips their build/
+      # postinstall steps, which this job needs none of.
+      - name: Install sibling packages for cross-package tests
+        run: |
+          pnpm --dir ../backend install --frozen-lockfile --ignore-scripts
+          pnpm --dir ../word-addin install --frozen-lockfile --ignore-scripts
       - run: pnpm run test:coverage
       - run: pnpm run typecheck
       - run: pnpm run lint
@@ -82,10 +162,15 @@ jobs:
         working-directory: word-addin
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Was 24; see the backend job's comment on the same change — pins to
+      # what word-addin/Dockerfile actually runs (also required by this
+      # package's own engines.node: ">=22").
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
-      - run: corepack enable && corepack prepare pnpm@11.1.2 --activate
+          node-version: 22
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.1.2
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - name: Build the Word image from the restricted context
