@@ -116,6 +116,14 @@ jobs:
       - name: Numbered migration history database guarantees
         run: bash scripts/test-migration-ledger-db.sh
 
+      # Gate B4 audit finding L5c: replays the real 0176/0058/0177 migration
+      # files against a disposable Postgres container and proves their CHECK
+      # constraints reject require_write_approval=false and
+      # apply_mode='direct'. Previously only the mocked Supabase client was
+      # ever exercised for these, never the database itself.
+      - name: Gate B4 write-approval and apply-mode database guarantees
+        run: bash scripts/test-gate-b4-write-approval-db.sh
+
       # A "Google Workspace approval database guarantees" step calling
       # scripts/test-google-workspace-db.sh used to run here. That script
       # does not exist in this tree, or in Altien/mikeOssAzure's own main:
