@@ -1478,6 +1478,27 @@ describe("user.routes", () => {
         });
     });
 
+    // Gate B4 audit finding N3: the same requireWriteApproval=false guarantee
+    // as the native Google Drive route, for the MCP connector PATCH route.
+    describe("PATCH /user/mcp-connectors/:connectorId", () => {
+        it("a requireWriteApproval=false patch never reaches the database as false", async () => {
+            supabaseState.tables.user_mcp_connectors = {
+                data: { id: "c1", user_id: "u1", require_write_approval: true },
+                error: null,
+            };
+
+            const res = await request(app)
+                .patch("/api/user/mcp-connectors/c1")
+                .set(...AUTH)
+                .send({ requireWriteApproval: false });
+
+            expect(res.status).toBe(200);
+            const updates = supabaseState.updates.user_mcp_connectors ?? [];
+            expect(updates).toHaveLength(1);
+            expect(updates[0]).not.toHaveProperty("require_write_approval");
+        });
+    });
+
     // Gate B4 audit finding L5a: requireWriteApproval is accepted in the
     // request body (so an old client's settings save is not rejected
     // outright) but must never reach the database as anything but true.
@@ -1512,6 +1533,46 @@ describe("user.routes", () => {
             expect(res.status).toBe(200);
             expect(res.body.requireWriteApproval).toBe(true);
             const updates = supabaseState.updates.user_google_drive_tokens ?? [];
+            expect(updates).toHaveLength(1);
+            expect(updates[0]).not.toHaveProperty("require_write_approval");
+            expect(updates[0]).toMatchObject({ enabled: false });
+        });
+    });
+
+    // Gate B4 audit finding N3: same guarantee as the Google Drive and MCP
+    // connector PATCH routes, for the generic Gmail/Calendar settings route.
+    describe("PATCH /user/integrations/gmail", () => {
+        it("a requireWriteApproval=false-only patch touches nothing in the database", async () => {
+            supabaseState.tables.user_google_workspace_tokens = {
+                data: null,
+                error: null,
+            };
+
+            const res = await request(app)
+                .patch("/api/user/integrations/gmail")
+                .set(...AUTH)
+                .send({ requireWriteApproval: false });
+
+            expect(res.status).toBe(200);
+            expect(
+                supabaseState.updates.user_google_workspace_tokens,
+            ).toBeUndefined();
+        });
+
+        it("a requireWriteApproval=false patch alongside a real change is silently dropped from that update", async () => {
+            supabaseState.tables.user_google_workspace_tokens = [
+                { data: { user_id: "u1" }, error: null },
+                { data: null, error: null },
+            ];
+
+            const res = await request(app)
+                .patch("/api/user/integrations/gmail")
+                .set(...AUTH)
+                .send({ enabled: false, requireWriteApproval: false });
+
+            expect(res.status).toBe(200);
+            const updates =
+                supabaseState.updates.user_google_workspace_tokens ?? [];
             expect(updates).toHaveLength(1);
             expect(updates[0]).not.toHaveProperty("require_write_approval");
             expect(updates[0]).toMatchObject({ enabled: false });
