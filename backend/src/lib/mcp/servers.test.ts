@@ -361,7 +361,7 @@ describe("MCP admin read-only allowlist (Gate B4 audit finding L1)", () => {
         resetAdminReadOnlyConnectorAllowlistCacheForTests();
     });
 
-    it("runs a tool directly once its connector's exact server URL is admin-allowlisted", async () => {
+    it("runs a listed tool directly once its connector's exact server URL and tool name are both admin-allowlisted", async () => {
         // Placeholder URL: production deployments name their real internal
         // "Wissen" (knowledge base) / "QM" (quality management) MCP servers
         // this way via MCP_ADMIN_READ_ONLY_CONNECTORS_JSON — never hardcoded
@@ -369,7 +369,7 @@ describe("MCP admin read-only allowlist (Gate B4 audit finding L1)", () => {
         const serverUrl = "https://wissen.example.internal/mcp";
         vi.stubEnv(
             "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
-            JSON.stringify([serverUrl]),
+            JSON.stringify([{ server_url: serverUrl, tools: ["do_thing"] }]),
         );
         const db = makeDb(
             makeTool(),
@@ -381,13 +381,68 @@ describe("MCP admin read-only allowlist (Gate B4 audit finding L1)", () => {
         ).toEqual({ type: "run" });
     });
 
+    // Gate B4 audit finding N1: the audit's own probe allowlisted a server
+    // and then called an unlisted write tool on it (erkenntnis_speichern,
+    // dokument_loeschen) and had it run with no approval — the allowlist used
+    // to grant every tool on an allowed server. Default deny: a server URL
+    // alone grants nothing.
+    it("still requires approval for a tool not named in that server's allowlist entry (default deny)", async () => {
+        const serverUrl = "https://wissen.example.internal/mcp";
+        vi.stubEnv(
+            "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+            JSON.stringify([{ server_url: serverUrl, tools: ["some_other_tool"] }]),
+        );
+        const db = makeDb(
+            makeTool(), // tool_name: "do_thing", not in the allowlisted set
+            { ...makeConnector(), name: "Wissen", server_url: serverUrl },
+            [],
+        );
+        expect(
+            (await planMcpToolCall(personalConnectorOwner("user-1"), "evil_do_thing", {}, db))
+                .type,
+        ).toBe("approval");
+    });
+
+    it.each([
+        ["erkenntnis_speichern"],
+        ["dokument_loeschen"],
+    ])(
+        "still requires approval for %s even when the allowlist lists it by name (ALWAYS_REQUIRES_APPROVAL does not apply, but an unlisted name does not run either)",
+        async (toolName) => {
+            // These two names are the audit's own probe tools; they are not
+            // hardcoded anywhere as always-requiring-approval (only
+            // erkenntnis_zurueckschreiben is), so the real guarantee under
+            // test is the one above: unless a server's allowlist entry names
+            // the exact tool, it is not exempt. Confirms that un-naming the
+            // tool (no "tools" entry matching it at all) still requires
+            // approval for these specific probe names too.
+            const serverUrl = "https://wissen.example.internal/mcp";
+            vi.stubEnv(
+                "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+                JSON.stringify([{ server_url: serverUrl, tools: ["do_thing"] }]),
+            );
+            const tool = { ...makeTool(), tool_name: toolName };
+            const db = makeDb(
+                tool,
+                { ...makeConnector(), name: "Wissen", server_url: serverUrl },
+                [],
+            );
+            expect(
+                (await planMcpToolCall(personalConnectorOwner("user-1"), "evil_do_thing", {}, db))
+                    .type,
+            ).toBe("approval");
+        },
+    );
+
     it("does not allowlist a connector by its editable display name alone", async () => {
         // A user can rename their own connector to "Wissen" or "QM"
         // (updateUserMcpConnector) — the allowlist must not be fooled by
         // that; it keys on the server URL, which a rename does not change.
         vi.stubEnv(
             "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
-            JSON.stringify(["https://wissen.example.internal/mcp"]),
+            JSON.stringify([
+                { server_url: "https://wissen.example.internal/mcp", tools: ["do_thing"] },
+            ]),
         );
         const db = makeDb(
             makeTool(),
@@ -400,11 +455,13 @@ describe("MCP admin read-only allowlist (Gate B4 audit finding L1)", () => {
         ).toBe("approval");
     });
 
-    it("erkenntnis_zurueckschreiben always requires approval, even on an allowlisted connector", async () => {
+    it("erkenntnis_zurueckschreiben always requires approval, even when allowlisted by name on an allowlisted connector", async () => {
         const serverUrl = "https://qm.example.internal/mcp";
         vi.stubEnv(
             "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
-            JSON.stringify([serverUrl]),
+            JSON.stringify([
+                { server_url: serverUrl, tools: ["erkenntnis_zurueckschreiben"] },
+            ]),
         );
         const tool = {
             ...makeTool(),
@@ -420,6 +477,85 @@ describe("MCP admin read-only allowlist (Gate B4 audit finding L1)", () => {
             (await planMcpToolCall(personalConnectorOwner("user-1"), "evil_do_thing", {}, db))
                 .type,
         ).toBe("approval");
+    });
+
+    // Gate B4 audit finding N2: port, query string, userinfo and fragment
+    // used to be silently dropped from the allowlist key, so a server on a
+    // different port, or reached with a different query string (a different
+    // tenant/scope), matched the same entry as the real, reviewed server.
+    describe("server URL identity (Gate B4 audit finding N2)", () => {
+        const allow = (serverUrl: string) =>
+            vi.stubEnv(
+                "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+                JSON.stringify([{ server_url: serverUrl, tools: ["do_thing"] }]),
+            );
+        const planFor = async (serverUrl: string) => {
+            const db = makeDb(
+                makeTool(),
+                { ...makeConnector(), name: "Wissen", server_url: serverUrl },
+                [],
+            );
+            return (
+                await planMcpToolCall(personalConnectorOwner("user-1"), "evil_do_thing", {}, db)
+            ).type;
+        };
+
+        it("a different port is a different server, even with the same host and path", async () => {
+            allow("https://wissen.example.internal/mcp");
+            expect(await planFor("https://wissen.example.internal:8443/mcp")).toBe(
+                "approval",
+            );
+        });
+
+        it("a different query string is a different server (e.g. a different tenant)", async () => {
+            allow("https://wissen.example.internal/mcp");
+            expect(
+                await planFor("https://wissen.example.internal/mcp?tenant=fremd"),
+            ).toBe("approval");
+        });
+
+        it("the exact same query string does match", async () => {
+            allow("https://wissen.example.internal/mcp?tenant=ours");
+            expect(
+                await planFor("https://wissen.example.internal/mcp?tenant=ours"),
+            ).toBe("run");
+        });
+
+        it("the exact same explicit port does match", async () => {
+            allow("https://wissen.example.internal:8443/mcp");
+            expect(await planFor("https://wissen.example.internal:8443/mcp")).toBe(
+                "run",
+            );
+        });
+
+        it("userinfo in the connector's server URL never matches, even against an identical allowlist entry", async () => {
+            allow("https://wissen.example.internal/mcp");
+            expect(
+                await planFor("https://user:pass@wissen.example.internal/mcp"),
+            ).toBe("approval");
+        });
+
+        it("a fragment in the connector's server URL never matches, even against an identical allowlist entry", async () => {
+            allow("https://wissen.example.internal/mcp");
+            expect(
+                await planFor("https://wissen.example.internal/mcp#ignored"),
+            ).toBe("approval");
+        });
+
+        it("rejects an allowlist entry whose own server_url carries userinfo", async () => {
+            vi.stubEnv(
+                "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+                JSON.stringify([
+                    {
+                        server_url: "https://user:pass@wissen.example.internal/mcp",
+                        tools: ["do_thing"],
+                    },
+                ]),
+            );
+            await expect(planFor("https://wissen.example.internal/mcp")).rejects.toThrow(
+                /server_url is not a valid/,
+            );
+        });
     });
 
     it("throws a clear configuration error for invalid allowlist JSON", async () => {

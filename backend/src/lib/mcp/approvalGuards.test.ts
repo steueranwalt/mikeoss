@@ -245,15 +245,27 @@ it("a direct (non-approved) call is refused for a self-reported read-only tool w
   await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, db);
   expect(mocks.callTool).not.toHaveBeenCalled();
 });
-it("a direct call runs once the connector's exact server URL is admin-allowlisted", async () => {
+it("a direct call runs once the connector's exact server URL and tool name are both admin-allowlisted", async () => {
   const { connector, tool, db } = fixture({ readOnlyHint: true });
   resetAdminReadOnlyConnectorAllowlistCacheForTests();
   vi.stubEnv(
     "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
-    JSON.stringify([connector.server_url]),
+    JSON.stringify([{ server_url: connector.server_url, tools: [tool.tool_name] }]),
   );
   await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, db);
   expect(mocks.callTool).toHaveBeenCalledOnce();
+});
+// Gate B4 audit finding N1: a server allowlisted for one tool must not
+// exempt a different, unlisted tool on the same server (default deny).
+it("a direct call is still refused for a tool not named in that server's allowlist entry", async () => {
+  const { connector, tool, db } = fixture({ readOnlyHint: true });
+  resetAdminReadOnlyConnectorAllowlistCacheForTests();
+  vi.stubEnv(
+    "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+    JSON.stringify([{ server_url: connector.server_url, tools: ["some_other_tool"] }]),
+  );
+  await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, db);
+  expect(mocks.callTool).not.toHaveBeenCalled();
 });
 it("erkenntnis_zurueckschreiben still runs through approval even on an allowlisted connector", async () => {
   const { connector } = fixture({ readOnlyHint: true });
@@ -281,7 +293,9 @@ it("erkenntnis_zurueckschreiben still runs through approval even on an allowlist
   resetAdminReadOnlyConnectorAllowlistCacheForTests();
   vi.stubEnv(
     "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
-    JSON.stringify([connector.server_url]),
+    JSON.stringify([
+      { server_url: connector.server_url, tools: ["erkenntnis_zurueckschreiben"] },
+    ]),
   );
   const plan = await planMcpToolCall(
     personalConnectorOwner("u1"),

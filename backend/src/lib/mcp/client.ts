@@ -301,39 +301,69 @@ export const ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES: ReadonlySet<string> =
     new Set(["erkenntnis_zurueckschreiben"]);
 
 /**
- * `serverUrl`, normalized so a trailing slash or letter-case difference in
- * an allowlist entry does not create or miss a match against the connector
- * being checked. Returns null for a URL that does not parse (never matches).
+ * `serverUrl`, normalized to an exact-match key: scheme, host, port (default
+ * ports are not inferred — an explicit port is part of the identity), path
+ * (trailing slash stripped) and query string, verbatim. A port, query
+ * string, userinfo or fragment used to be silently dropped, so
+ * `https://wissen.example.internal:8443/mcp` or
+ * `...?tenant=fremd` matched the same allowlist entry as the real server
+ * (Gate B4 audit finding N2) — a different port is a different service, and
+ * a query string can carry a different tenant/scope entirely, so both are
+ * now part of the key rather than optional decoration. A URL carrying
+ * userinfo (`user:pass@host`) or a fragment never matches anything: neither
+ * has a legitimate reason to appear in a configured server URL, and a
+ * fragment is never even sent to a server, so one present here can only be
+ * an attempt to confuse a human reading the allowlist.
  */
 function normalizedServerUrlKey(serverUrl: string): string | null {
+    let url: URL;
     try {
-        const url = new URL(serverUrl);
-        return `${url.protocol}//${canonicalHostname(url)}${url.pathname.replace(/\/+$/, "")}`;
+        url = new URL(serverUrl);
     } catch {
         return null;
     }
+    if (url.username || url.password || url.hash) return null;
+    const path = url.pathname.replace(/\/+$/, "");
+    return `${url.protocol}//${canonicalHostname(url)}${url.port ? `:${url.port}` : ""}${path}${url.search}`;
 }
 
-let cachedAdminReadOnlyConnectorUrls: ReadonlySet<string> | undefined;
+let cachedAdminReadOnlyConnectors: ReadonlyMap<string, ReadonlySet<string>> | undefined;
 
 /**
- * Connectors an administrator has reviewed and approved to run every tool
- * without per-call approval — identified by the connector's exact server
- * URL, never by its own editable display name and never by a tool's
- * self-reported annotations (see mcpToolRequiresApproval). Configured
- * out-of-repo via MCP_ADMIN_READ_ONLY_CONNECTORS_JSON (a JSON array of
- * server URL strings), the same one-env-var-per-deployment pattern as
- * lib/llm/registry.ts's MIKE_MODEL_CONFIG_JSON: this public repository must
- * not carry firm-specific infrastructure names. A deployment's own
- * configuration is what actually names its real internal "Wissen"
- * (knowledge base) and "QM" (quality management) MCP servers this way.
+ * Gate B4 audit finding N1: a connector used to be allowlisted wholesale —
+ * any tool at all on an allowed server URL ran without approval, which the
+ * audit's own probe demonstrated by calling an unlisted write tool
+ * (`erkenntnis_speichern`, `dokument_loeschen`) on an allowlisted server and
+ * getting it to run. The allowlist is now pairs of (server URL, tool
+ * names): a server URL alone grants nothing — every tool not explicitly
+ * named for that exact server still requires approval. Default deny.
  */
-function adminReadOnlyConnectorUrls(): ReadonlySet<string> {
-    if (cachedAdminReadOnlyConnectorUrls) return cachedAdminReadOnlyConnectorUrls;
+export type AdminReadOnlyConnectorEntry = {
+    server_url: string;
+    tools: string[];
+};
+
+/**
+ * Connectors and tools an administrator has reviewed and approved to run
+ * without per-call approval — identified by the connector's exact server
+ * URL (see normalizedServerUrlKey), never by its own editable display name
+ * and never by a tool's self-reported annotations (see
+ * mcpToolRequiresApproval), and scoped to the exact tool names listed, never
+ * "every tool on this server" (Gate B4 audit finding N1). Configured
+ * out-of-repo via MCP_ADMIN_READ_ONLY_CONNECTORS_JSON (a JSON array of
+ * `{"server_url": "...", "tools": ["..."]}` entries), the same
+ * one-env-var-per-deployment pattern as lib/llm/registry.ts's
+ * MIKE_MODEL_CONFIG_JSON: this public repository must not carry
+ * firm-specific infrastructure names. A deployment's own configuration is
+ * what actually names its real internal "Wissen" (knowledge base) and "QM"
+ * (quality management) MCP servers this way.
+ */
+function adminReadOnlyConnectors(): ReadonlyMap<string, ReadonlySet<string>> {
+    if (cachedAdminReadOnlyConnectors) return cachedAdminReadOnlyConnectors;
     const raw = process.env.MCP_ADMIN_READ_ONLY_CONNECTORS_JSON?.trim();
     if (!raw) {
-        cachedAdminReadOnlyConnectorUrls = new Set();
-        return cachedAdminReadOnlyConnectorUrls;
+        cachedAdminReadOnlyConnectors = new Map();
+        return cachedAdminReadOnlyConnectors;
     }
     let parsed: unknown;
     try {
@@ -347,30 +377,63 @@ function adminReadOnlyConnectorUrls(): ReadonlySet<string> {
     }
     if (!Array.isArray(parsed)) {
         throw new Error(
-            "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON must be a JSON array of server URL strings",
+            'MCP_ADMIN_READ_ONLY_CONNECTORS_JSON must be a JSON array of {"server_url", "tools"} entries',
         );
     }
-    const normalized = new Set<string>();
-    for (const entry of parsed) {
-        if (typeof entry !== "string") continue;
-        const key = normalizedServerUrlKey(entry);
-        if (key) normalized.add(key);
+    const byKey = new Map<string, Set<string>>();
+    for (const [index, entry] of parsed.entries()) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            throw new Error(
+                `MCP_ADMIN_READ_ONLY_CONNECTORS_JSON[${index}] must be an object with "server_url" and "tools"`,
+            );
+        }
+        const { server_url: serverUrl, tools } = entry as Record<string, unknown>;
+        if (typeof serverUrl !== "string" || !serverUrl) {
+            throw new Error(
+                `MCP_ADMIN_READ_ONLY_CONNECTORS_JSON[${index}].server_url must be a non-empty string`,
+            );
+        }
+        if (!Array.isArray(tools) || !tools.length || !tools.every((t) => typeof t === "string" && t)) {
+            throw new Error(
+                `MCP_ADMIN_READ_ONLY_CONNECTORS_JSON[${index}].tools must be a non-empty array of tool-name strings`,
+            );
+        }
+        const key = normalizedServerUrlKey(serverUrl);
+        if (!key) {
+            throw new Error(
+                `MCP_ADMIN_READ_ONLY_CONNECTORS_JSON[${index}].server_url is not a valid, userinfo/fragment-free URL: ${serverUrl}`,
+            );
+        }
+        const existing = byKey.get(key) ?? new Set<string>();
+        for (const tool of tools as string[]) existing.add(tool);
+        byKey.set(key, existing);
     }
-    cachedAdminReadOnlyConnectorUrls = normalized;
-    return cachedAdminReadOnlyConnectorUrls;
+    cachedAdminReadOnlyConnectors = byKey;
+    return cachedAdminReadOnlyConnectors;
 }
 
 /** Test-only: forces the next read to re-parse the environment variable. */
 export function resetAdminReadOnlyConnectorAllowlistCacheForTests(): void {
-    cachedAdminReadOnlyConnectorUrls = undefined;
+    cachedAdminReadOnlyConnectors = undefined;
+}
+
+/**
+ * Gate B4 audit finding N13: parses and validates
+ * MCP_ADMIN_READ_ONLY_CONNECTORS_JSON eagerly, so a malformed allowlist
+ * fails the server's startup instead of surfacing for the first time on
+ * whatever request happens to be the first MCP tool call after a deploy.
+ * Call once during boot (src/index.ts); safe to call more than once.
+ */
+export function validateMcpAdminReadOnlyAllowlistAtStartup(): void {
+    adminReadOnlyConnectors();
 }
 
 /**
  * Whether `toolName` on the connector at `serverUrl` may run without
- * pausing for the user's approval. Gate B4 audit finding L1: an
- * administrator's allowlist entry for the exact server URL is the only way
- * to exempt a tool, and ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES overrides even
- * that.
+ * pausing for the user's approval. Gate B4 audit finding L1/N1: an
+ * administrator's allowlist entry for the exact server URL AND the exact
+ * tool name is the only way to exempt a tool — the server URL alone grants
+ * nothing — and ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES overrides even that.
  */
 export function isApprovalExemptMcpTool(
     serverUrl: string,
@@ -378,7 +441,9 @@ export function isApprovalExemptMcpTool(
 ): boolean {
     if (ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES.has(toolName)) return false;
     const key = normalizedServerUrlKey(serverUrl);
-    return key !== null && adminReadOnlyConnectorUrls().has(key);
+    if (key === null) return false;
+    const tools = adminReadOnlyConnectors().get(key);
+    return tools !== undefined && tools.has(toolName);
 }
 
 /**
