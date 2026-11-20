@@ -123,7 +123,10 @@ export function driveDb(
                 const row = {
                     enabled: previous?.enabled ?? true,
                     disabled_tools: previous?.disabled_tools ?? [],
-                    require_write_approval: previous?.require_write_approval ?? false,
+                    // Gate B4: the column default (and now a DB CHECK
+                    // constraint, migration 0176) is true; this fake RPC
+                    // mirrors that instead of the pre-Gate-B4 default.
+                    require_write_approval: previous?.require_write_approval ?? true,
                     read_only: previous?.read_only ?? false,
                     grant_id: randomUUID(),
                     ...(args.p_tokens as Row),

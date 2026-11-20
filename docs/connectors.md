@@ -173,6 +173,18 @@ Every connector — MCP servers such as Slack, and Google Drive, Gmail and
 Calendar — has write access by default: the assistant can use a tool that
 changes data as soon as the connector is installed.
 
+> **Gate B4.** Write approval is mandatory and no longer a per-connector
+> setting at all: `require_write_approval` cannot be set to `false` through
+> any API (`connectorSettingsPatch`, `updateUserMcpConnector`) or stored as
+> `false` in the database (migration 0176 adds a `CHECK` constraint on
+> `user_mcp_connectors`, `user_google_drive_tokens`, and
+> `user_google_workspace_tokens`). The Manage dialog's toggle is shown
+> disabled rather than removed, so it still communicates that every write
+> needs approval. The same applies to Word document edits: the add-in's
+> edit-apply-mode selector (previously Review/Edit) always reviews an edit
+> before it reaches the document; the "apply immediately" mode has been
+> removed from the UI.
+>
 > **Dev divergence (sync-log: 2ec7cfc1).** In this deployment **Ask for
 > permission for write actions** is on by default for every connector, and
 > the backend treats only an explicit "off" as no approval. Upgrading keeps

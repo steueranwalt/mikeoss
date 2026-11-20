@@ -50,7 +50,6 @@ import {
     parseDriveWrite,
     prepareDriveWrite,
     executeDriveWrite,
-    runDriveWrite,
     type DriveWriteSnapshot,
 } from "./googleDriveWrites";
 import { AppError, withKind, type ErrorKind } from "../appError";
@@ -517,7 +516,7 @@ export async function getGoogleDriveStatus(
                 schemaReady: false,
                 enabled: true,
                 writeEnabled: false,
-                requireWriteApproval: false,
+                requireWriteApproval: true,
                 readOnly: false,
                 pickerAvailable: available && await googleDrivePickerAvailable(null),
                 tools: googleDriveToolList(null),
@@ -533,7 +532,9 @@ export async function getGoogleDriveStatus(
         schemaReady: true,
         enabled: row?.enabled !== false,
         writeEnabled: hasDriveWriteAccess(row),
-        requireWriteApproval: row?.require_write_approval !== false,
+        // Gate B4: always true; see connectorSettingsPatch() for why this
+        // is no longer a settable per-connector value.
+        requireWriteApproval: true,
         readOnly: row?.read_only === true,
         pickerAvailable: available && await googleDrivePickerAvailable(row),
         ...(row?.grant_id ? { grantId: row.grant_id } : {}),
@@ -1181,8 +1182,9 @@ async function recheckDriveWrite(
         throw new GoogleDriveUserError(
             "The Google Drive connection changed. Review the action again.",
         );
-    // Dev (sync-log: 2ec7cfc1): approval fails closed — only an explicit false skips it.
-    if (!approved && row.require_write_approval !== false)
+    // Gate B4: write approval is mandatory, not a per-connector setting —
+    // see connectorSettingsPatch(). require_write_approval is never false.
+    if (!approved)
         throw new GoogleDriveUserError(
             "This Google Drive action requires approval in the assistant.",
         );
@@ -1202,8 +1204,7 @@ export async function planGoogleDriveCall(
             input,
             db,
         );
-        // Dev (sync-log: 2ec7cfc1): approval fails closed — only an explicit false skips it.
-        if (row.require_write_approval === false) return { type: "run" };
+        // Gate B4: every write tool is planned as an approval, unconditionally.
         const grantId = row.grant_id!;
         const token = await getAccessToken(owner, db, grantId);
         const action = await prepareDriveWrite(name, args, token);
@@ -1341,31 +1342,14 @@ export async function executeGoogleDriveToolCall(
 ): Promise<{ content: string; event: McpToolEvent }> {
     try {
         assertGoogleDriveAvailable();
-        if (driveWriteTool(toolName)) {
-            const { row, args: parsed } = await resolveDriveWrite(
-                owner,
-                toolName,
-                args,
-                db,
+        // Gate B4: a write tool has no unapproved execution path at all —
+        // executeApprovedGoogleDriveCall (below) is the only way to run one,
+        // and only after planGoogleDriveCall produced an approval the user
+        // accepted.
+        if (driveWriteTool(toolName))
+            throw new GoogleDriveUserError(
+                "This Google Drive action requires approval in the assistant.",
             );
-            if (row.require_write_approval !== false)
-                throw new GoogleDriveUserError(
-                    "This Google Drive action requires approval in the assistant.",
-                );
-            const grantId = row.grant_id!;
-            const token = await getAccessToken(owner, db, grantId);
-            const data = await runDriveWrite(toolName, parsed, token, () =>
-                recheckDriveWrite(owner, toolName, parsed, db, grantId, false),
-            );
-            return {
-                content: JSON.stringify({
-                    ok: true,
-                    note: UNTRUSTED_NOTE,
-                    data,
-                }),
-                event: driveEvent(toolName, "ok"),
-            };
-        }
         const row = await loadTokenRow(owner, db);
         if (
             row &&

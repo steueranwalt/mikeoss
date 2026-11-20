@@ -336,7 +336,11 @@ export async function toConnectorSummary(
         serverUrl: connector.server_url,
         authType: connector.auth_type ?? "none",
         enabled: connector.enabled,
-        requireWriteApproval: connector.require_write_approval !== false,
+        // Gate B4: always true. Kept as a field (rather than removed from
+        // McpConnectorSummary) so the frontend's existing display logic does
+        // not need a migration of its own; see connectorSettingsPatch() for
+        // why it is no longer settable.
+        requireWriteApproval: true,
         readOnly: connector.read_only === true,
         hasAuthConfig: !!connector.encrypted_auth_config,
         customHeaderKeys: Object.keys(authConfig.headers ?? {}),

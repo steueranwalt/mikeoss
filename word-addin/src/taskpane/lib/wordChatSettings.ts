@@ -13,11 +13,16 @@ export type { WordChatStorageMode };
  * - `approval`: validate and preview each edit before the user applies it.
  * - `direct`: apply each streamed edit immediately as a pending tracked
  *   change. Applied edits remain available for acceptance or rejection.
+ *
+ * Gate B4: `direct` is retained only as a type — `useWordEditApplyMode`
+ * below never returns it and ignores any attempt to set it. Every Word edit
+ * is reviewed before it reaches the document, and this is not a user
+ * setting. See EditApplyModeMenu.tsx, which no longer offers `direct` as a
+ * choice.
  */
 export type WordEditApplyMode = "approval" | "direct";
 
 const STORAGE_KEY = "mike_word_chat_storage_mode";
-const APPLY_MODE_KEY = "mike_word_edit_apply_mode";
 
 function storageKey(ownerId: string): string {
   return `${STORAGE_KEY}:${ownerId}`;
@@ -72,34 +77,18 @@ export function useWordChatStoragePreference(ownerId: string | null): {
   return { mode, loading, setMode };
 }
 
+/**
+ * Gate B4: always "approval", and `setMode` is a no-op. This was previously
+ * a per-device preference backed by OfficeRuntime.storage (key
+ * "mike_word_edit_apply_mode"); that storage key is no longer read or
+ * written, so a device with "direct" saved from before this change is
+ * unaffected — it simply stops being read. `setMode` stays in the returned
+ * shape (rather than being removed) so callers do not need their own change;
+ * see EditApplyModeMenu.tsx for the UI side of this.
+ */
 export function useWordEditApplyMode(): {
   mode: WordEditApplyMode;
   setMode: (mode: WordEditApplyMode) => void;
 } {
-  const [mode, setModeState] = useState<WordEditApplyMode>("approval");
-
-  useEffect(() => {
-    let cancelled = false;
-    void OfficeRuntime.storage
-      .getItem(APPLY_MODE_KEY)
-      .then((stored) => {
-        if (!cancelled && stored === "direct") setModeState("direct");
-      })
-      .catch(() => {
-        // Approval is the safe default when preference storage is
-        // unavailable or contains an unknown value.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const setMode = useCallback((next: WordEditApplyMode) => {
-    // The toggle must not lag on pane storage latency; persistence is
-    // best-effort and the safe default covers a lost write.
-    setModeState(next);
-    void OfficeRuntime.storage.setItem(APPLY_MODE_KEY, next).catch(() => {});
-  }, []);
-
-  return { mode, setMode };
+  return { mode: "approval", setMode: () => {} };
 }

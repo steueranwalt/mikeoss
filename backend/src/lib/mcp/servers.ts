@@ -270,6 +270,11 @@ export async function updateUserMcpConnector(
         name?: string;
         serverUrl?: string;
         enabled?: boolean;
+        // Gate B4: write approval is mandatory and not user-configurable.
+        // The field stays in the input type so a caller that still sends it
+        // does not hit a type error; it is silently ignored below (see
+        // connectorSettingsPatch() in lib/integrations/connectorSettings.ts
+        // for the equivalent native-connector decision).
         requireWriteApproval?: boolean;
         readOnly?: boolean;
         bearerToken?: string | null;
@@ -292,9 +297,6 @@ export async function updateUserMcpConnector(
         update.enabled = input.enabled;
     }
     if (typeof input.readOnly === "boolean") update.read_only = input.readOnly;
-    if (typeof input.requireWriteApproval === "boolean") {
-        update.require_write_approval = input.requireWriteApproval;
-    }
     if ("bearerToken" in input || "headers" in input) {
         const current = await loadConnector(userId, connectorId, db).catch(
             () => null,
@@ -584,12 +586,9 @@ export async function planMcpToolCall(
     const resolved = await resolveCallableTool(owner, openaiToolName, db);
     if (!resolved) return { type: "result", ...unavailableTool(openaiToolName) };
     const { connector, tool } = resolved;
-    if (
-        !mcpToolRequiresWriteAccess(tool) ||
-        // Dev (sync-log: 2ec7cfc1): approval fails closed — only an explicit false skips it.
-        connector.require_write_approval === false
-    )
-        return { type: "run" };
+    // Gate B4: every write tool is planned as an approval, unconditionally —
+    // require_write_approval is no longer a per-connector escape hatch.
+    if (!mcpToolRequiresWriteAccess(tool)) return { type: "run" };
     if (JSON.stringify(args).length > MAX_APPROVAL_ARGUMENT_CHARS) {
         return {
             type: "result",
@@ -726,11 +725,9 @@ async function callResolvedTool(
                     throw new Error(
                         "This connector tool was changed, turned off, or set to read-only.",
                     );
-                if (
-                    mcpToolRequiresWriteAccess(current.tool) &&
-                    current.connector.require_write_approval !== false &&
-                    !approvedFingerprint
-                )
+                // Gate B4: write approval is mandatory, not a per-connector
+                // setting — require_write_approval is never false.
+                if (mcpToolRequiresWriteAccess(current.tool) && !approvedFingerprint)
                     throw new Error(
                         "This connector action requires approval in the assistant.",
                     );

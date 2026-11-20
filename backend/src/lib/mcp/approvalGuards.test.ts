@@ -115,14 +115,17 @@ it("read-only mode must block a write tool whose server omitted annotations", as
   );
   expect(plan.type).toBe("result");
 });
-it("enabling approval while an MCP connection is opening must prevent an unapproved write", async () => {
+it("Gate B4: a stored require_write_approval=false must not let an unapproved write through", async () => {
+  // Defense in depth: the application no longer ever writes `false` to this
+  // column (connectorSettingsPatch, updateUserMcpConnector) and the database
+  // rejects it too (migration 0176's CHECK constraint), but a row from
+  // before that migration, or a direct DB edit, must still not bypass
+  // approval at the point a write actually runs.
   const { connector, tool, db } = fixture();
+  connector.require_write_approval = false;
   expect(
     (await planMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, {}, db)).type,
-  ).toBe("run");
-  mocks.connect.mockImplementation(async () => {
-    connector.require_write_approval = true;
-  });
+  ).toBe("approval");
   await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, db);
   expect(mocks.callTool).not.toHaveBeenCalled();
 });

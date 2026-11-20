@@ -1210,28 +1210,6 @@ function WorkspaceConnectors({
     );
   };
 
-  const handleRequireWriteApproval = async (
-    connectorId: string,
-    enabled: boolean,
-  ) => {
-    await runSensitiveAction(
-      { type: "write-approval", connectorId, enabled },
-      async () => {
-        setBusyKey(`approval:${connectorId}`);
-        try {
-          replaceConnector(
-            await updateMcpConnector(connectorId, {
-              requireWriteApproval: enabled,
-            }),
-            { preserveToolsOnEmpty: true },
-          );
-        } finally {
-          setBusyKey(null);
-        }
-      },
-    );
-  };
-
   const handleReadOnly = async (connectorId: string, enabled: boolean) => {
     await runSensitiveAction(
       { type: "read-only", connectorId, enabled },
@@ -1630,10 +1608,6 @@ function WorkspaceConnectors({
         onReadOnly={(enabled) =>
           selectedConnector && void handleReadOnly(selectedConnector.id, enabled)
         }
-        onRequireWriteApproval={(enabled) =>
-          selectedConnector &&
-          void handleRequireWriteApproval(selectedConnector.id, enabled)
-        }
       />
 
       <ConnectorDetailsModal
@@ -1685,12 +1659,6 @@ function WorkspaceConnectors({
           selectedGoogle &&
           void runNativeUpdate(`read-only:${selectedGoogle.provider}`, () =>
             selectedGoogle.updateSettings({ readOnly }),
-          )
-        }
-        onRequireWriteApproval={(requireWriteApproval) =>
-          selectedGoogle &&
-          void runNativeUpdate(`approval:${selectedGoogle.provider}`, () =>
-            selectedGoogle.updateSettings({ requireWriteApproval }),
           )
         }
       />

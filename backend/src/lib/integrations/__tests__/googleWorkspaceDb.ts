@@ -127,7 +127,10 @@ export function workspaceDb() {
         // Reconnecting keeps the user's connector settings.
         grants.push({
           enabled: prior?.enabled ?? true,
-          require_write_approval: prior?.require_write_approval ?? false,
+          // Gate B4: the column default (and now a DB CHECK constraint,
+          // migration 0176) is true; this fake RPC mirrors that instead of
+          // the pre-Gate-B4 default.
+          require_write_approval: prior?.require_write_approval ?? true,
           read_only: prior?.read_only ?? false,
           disabled_tools: prior?.disabled_tools ?? [],
           ...tokens,

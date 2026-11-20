@@ -392,7 +392,7 @@ describe("Google connector settings", () => {
     const s = await connected(true);
     await setWorkspaceToolEnabled(s.db, personalConnectorOwner("u1"), "gmail", "gmail_send", false);
     const status = await workspaceConnectorStatus(s.db, personalConnectorOwner("u1"), "gmail");
-    expect(status).toMatchObject({ enabled: true, requireWriteApproval: false });
+    expect(status).toMatchObject({ enabled: true, requireWriteApproval: true });
     expect(status.tools.find((t) => t.name === "gmail_send")).toMatchObject({
       title: "Send email",
       write: true,
@@ -536,18 +536,14 @@ describe("Google write access", () => {
       parseWorkspaceTool("gmail_send", { ...email, approved: true }),
     ).toThrow("Invalid");
   });
-  it("runs a write directly when the connection does not ask for permission", async () => {
+  it("Gate B4: a write is always planned as an approval, never run directly", async () => {
     const s = await connected(true);
     expect(
-      await planGoogleWorkspaceCall(personalConnectorOwner("u1"), "gmail_send", email, s.db),
-    ).toEqual({ type: "run" });
+      (await planGoogleWorkspaceCall(personalConnectorOwner("u1"), "gmail_send", email, s.db)).type,
+    ).toBe("approval");
+    const item = await approvalFor(s);
     fetchMock.mockResolvedValueOnce(json({ id: "sent-id" }));
-    const result = await executeGoogleWorkspaceToolCall(
-      personalConnectorOwner("u1"),
-      "gmail_send",
-      email,
-      s.db,
-    );
+    const result = await executeApprovedGoogleWorkspaceCall(personalConnectorOwner("u1"), item, s.db);
     expect(result.event.status).toBe("ok");
     expect(JSON.parse(result.content)).toMatchObject({
       ok: true,
@@ -555,6 +551,18 @@ describe("Google write access", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toContain("/messages/send");
+  });
+  it("a write tool has no direct, unapproved execution path", async () => {
+    const s = await connected(true);
+    const result = await executeGoogleWorkspaceToolCall(
+      personalConnectorOwner("u1"),
+      "gmail_send",
+      email,
+      s.db,
+    );
+    expect(result.event.status).toBe("error");
+    expect(result.event.error).toContain("requires approval");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
   it("plans an approval bound to the grant without sending, then sends exactly what was reviewed", async () => {
     const s = await connected(true);
@@ -607,14 +615,10 @@ describe("Google write access", () => {
   );
   it("reports an uncertain send instead of retrying it or leaking provider text", async () => {
     const s = await connected(true);
+    const item = await approvalFor(s);
     const cause = new Error("provider response lost with secret");
     fetchMock.mockRejectedValueOnce(cause);
-    const result = await executeGoogleWorkspaceToolCall(
-      personalConnectorOwner("u1"),
-      "gmail_send",
-      email,
-      s.db,
-    );
+    const result = await executeApprovedGoogleWorkspaceCall(personalConnectorOwner("u1"), item, s.db);
     expect(result.event.status).toBe("error");
     expect(result.event.error).toContain("uncertain");
     expect(result.content).not.toContain("provider response lost");
@@ -628,13 +632,9 @@ describe("Google write access", () => {
     "reports uncertain HTTP %i writes while keeping definite rejections quiet",
     async (status) => {
       const s = await connected(true);
+      const item = await approvalFor(s);
       fetchMock.mockResolvedValueOnce(json({ error: "private upstream details" }, status));
-      const result = await executeGoogleWorkspaceToolCall(
-        personalConnectorOwner("u1"),
-        "gmail_send",
-        email,
-        s.db,
-      );
+      const result = await executeApprovedGoogleWorkspaceCall(personalConnectorOwner("u1"), item, s.db);
       expect(result.event.status).toBe("error");
       expect(result.content).not.toContain("private upstream details");
       expect(fetchMock).toHaveBeenCalledTimes(1);
