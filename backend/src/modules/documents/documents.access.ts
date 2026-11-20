@@ -4,6 +4,8 @@
 import {
     attachActiveVersionPaths,
     attachLatestVersionNumbers,
+    loadActiveVersion,
+    pendingAiEditVersionIds,
 } from "../../lib/documentVersions";
 import { creatorScopedAllowed, ensureDocAccess } from "../../lib/access";
 import { can, type ProjectRole } from "../../lib/permissions";
@@ -117,6 +119,39 @@ export async function getDocument(
         can_delete: canReplace,
     } };
 
+}
+
+/**
+ * Gate B4 audit finding N30/N31: the viewer asks the server whether this
+ * exact version is an unreviewed AI draft or still has pending KI edits,
+ * instead of trusting flags the panel document happened to carry.
+ */
+export async function getDocumentAiStatus(
+    documentId: string,
+    userId: string,
+    userEmail: string | undefined,
+    versionId: string | null,
+    db: Db,
+): Promise<
+    | { ok: true; ai_draft: boolean; unresolved_ai: boolean }
+    | { ok: false; kind: "not_found" | "forbidden" }
+    | { ok: false; kind: "error"; error: unknown }
+> {
+    const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
+    if (!access.ok) return access;
+    try {
+        const version = await loadActiveVersion(documentId, db, versionId);
+        if (!version) return { ok: false, kind: "not_found" };
+        const pending = await pendingAiEditVersionIds(db, [version.id]);
+        const aiDraft = version.ai_draft === true;
+        return {
+            ok: true,
+            ai_draft: aiDraft,
+            unresolved_ai: aiDraft || pending.has(version.id),
+        };
+    } catch (error) {
+        return { ok: false, kind: "error", error };
+    }
 }
 
 // ---------------------------------------------------------------------------

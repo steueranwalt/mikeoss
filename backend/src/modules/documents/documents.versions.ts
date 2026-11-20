@@ -20,7 +20,11 @@ import {
 } from "../../lib/storage";
 import { convertedPdfKey, docxToPdf } from "../../lib/convert";
 import { enqueueConversion } from "../../lib/queue/conversionQueue";
-import { contentSha256, loadActiveVersion } from "../../lib/documentVersions";
+import {
+    contentSha256,
+    loadActiveVersion,
+    pendingAiEditVersionIds,
+} from "../../lib/documentVersions";
 import { creatorScopedAllowed } from "../../lib/access";
 import { can, DOCUMENT_EDIT_FORBIDDEN } from "../../lib/permissions";
 import {
@@ -63,10 +67,25 @@ export async function listVersions(
         .eq("document_id", documentId)
         .order("created_at", { ascending: true });
 
+    const versions = (rows ?? []) as Array<{
+        id: string;
+        ai_draft?: boolean | null;
+        [k: string]: unknown;
+    }>;
+    // Gate B4 audit finding N31: each version row carries unresolved_ai so
+    // chat tabs and the version picker can choose /display without a second
+    // round-trip guessing at pending edits.
+    const pending = await pendingAiEditVersionIds(
+        db,
+        versions.map((row) => row.id),
+    );
     return {
         ok: true,
         current_version_id: access.doc.current_version_id ?? null,
-        versions: rows ?? [],
+        versions: versions.map((row) => ({
+            ...row,
+            unresolved_ai: row.ai_draft === true || pending.has(row.id),
+        })),
     };
 }
 
@@ -178,6 +197,14 @@ export async function createVersionFromDocument(
             kind: "source_no_active",
             detail: "Source document has no active version.",
         };
+    // Gate B4 audit finding N32: a human document can still carry pending
+    // KI tracked changes. Copying only `ai_draft` would mint a clean-looking
+    // version whose bytes still contain those changes and export without a
+    // stamp. Mark the copy a draft (or, if we cannot read pending edits,
+    // refuse the copy).
+    const pendingOnSource = await pendingAiEditVersionIds(db, [active.id]);
+    const copyAiDraft =
+        active.ai_draft === true || pendingOnSource.has(active.id);
     const sourceType = active.file_type ?? "";
 
     const bytes = await downloadFile(active.storage_path);
@@ -278,13 +305,12 @@ export async function createVersionFromDocument(
             content_sha256: contentSha256(bytes),
         },
         {
-            // Gate B4 audit finding N21: "adopt as version" (write the
-            // source document's active bytes as a new version of the
-            // target) carries the source version's ai_draft forward, the
-            // same way a tracked-change edit inherits it — the bytes being
-            // adopted are still a model-authored draft nobody has approved
-            // just because they landed under a new document/version.
-            aiDraft: active.ai_draft === true,
+            // Gate B4 audit finding N21/N32: "adopt as version" carries
+            // the source version's unreviewed AI status forward — both
+            // `ai_draft` and pending tracked changes, because the copied
+            // bytes still contain those changes even when document_edits
+            // rows are not duplicated onto the new version.
+            aiDraft: copyAiDraft,
         },
     );
     if (verErr || !versionRow) {

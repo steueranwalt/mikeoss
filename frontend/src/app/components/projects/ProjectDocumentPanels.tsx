@@ -136,6 +136,12 @@ export const ProjectDocumentPanels = memo(function ProjectDocumentPanels({
                     tab.versionId === document?.current_version_id
                         ? (document?.ai_draft ?? sourceDocument?.ai_draft)
                         : sourceDocument?.ai_draft,
+                unresolved_ai:
+                    !tab.versionId ||
+                    tab.versionId === document?.current_version_id
+                        ? (document?.unresolved_ai ??
+                          sourceDocument?.unresolved_ai)
+                        : sourceDocument?.unresolved_ai,
             };
             return { tab, panelDocument, refetchKey };
         });

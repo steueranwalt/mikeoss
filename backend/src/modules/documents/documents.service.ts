@@ -22,6 +22,7 @@
 export {
     getDocument,
     deleteDocument,
+    getDocumentAiStatus,
 } from "./documents.access";
 
 export {

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   loadActiveVersion: vi.fn(),
   downloadFile: vi.fn(),
   downloadFileIfAvailable: vi.fn(),
+  officeBytesToPdf: vi.fn(),
 }));
 
 vi.mock("../../../lib/access", async (importOriginal) => ({
@@ -22,6 +23,11 @@ vi.mock("../../../lib/storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../lib/storage")>()),
   downloadFile: mocks.downloadFile,
   downloadFileIfAvailable: mocks.downloadFileIfAvailable,
+}));
+
+vi.mock("../../../lib/convert", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../lib/convert")>()),
+  officeBytesToPdf: mocks.officeBytesToPdf,
 }));
 
 import { getDisplayableVersion } from "../documents.download";
@@ -152,7 +158,7 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
     }
   });
 
-  it("refuses an xlsx draft when it cannot be converted to a stamped PDF (N17)", async () => {
+  it("stamps an xlsx draft when the converter returns a PDF (N17/N33)", async () => {
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
       storage_path: "documents/user-1/doc-1/source.xlsx",
@@ -163,8 +169,34 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
       file_type: "xlsx",
       ai_draft: true,
     });
-    const original = Buffer.from("fake xlsx bytes");
-    mocks.downloadFile.mockResolvedValue(original);
+    mocks.downloadFile.mockResolvedValue(Buffer.from("fake xlsx bytes"));
+    const converted = await makePdfBytes();
+    mocks.officeBytesToPdf.mockResolvedValue(converted);
+
+    const result = await getDisplayableVersion("doc-1", "user-1", "u@example.com", null, database());
+
+    expect(mocks.officeBytesToPdf).toHaveBeenCalledOnce();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isAiDraft).toBe(true);
+      expect(result.display.contentType).toBe("application/pdf");
+      expect(result.display.bytes.byteLength).toBeGreaterThan(converted.byteLength);
+    }
+  });
+
+  it("refuses an xlsx draft when the converter is missing or fails (N17/N33)", async () => {
+    mocks.loadActiveVersion.mockResolvedValue({
+      id: "version-1",
+      storage_path: "documents/user-1/doc-1/source.xlsx",
+      pdf_storage_path: null,
+      version_number: 1,
+      filename: "financials.xlsx",
+      source: "tool_write",
+      file_type: "xlsx",
+      ai_draft: true,
+    });
+    mocks.downloadFile.mockResolvedValue(Buffer.from("fake xlsx bytes"));
+    mocks.officeBytesToPdf.mockRejectedValue(new Error("soffice not installed"));
 
     const result = await getDisplayableVersion("doc-1", "user-1", "u@example.com", null, database());
 

@@ -83,6 +83,7 @@ import {
     getAuditActors,
     getPanelDocument,
     getDocument,
+    getDocumentAiStatus,
     getDocumentFile,
     getDocumentFileUrl,
     getDocumentUrl,
@@ -3034,6 +3035,11 @@ describe("thin endpoint wrappers", () => {
             name: "getDocument",
             call: () => getDocument("d1"),
             url: "/single-documents/d1",
+        },
+        {
+            name: "getDocumentAiStatus",
+            call: () => getDocumentAiStatus("d 1", "v 1"),
+            url: "/single-documents/d%201/ai-status?version_id=v%201",
         },
         {
             name: "deleteDocument",

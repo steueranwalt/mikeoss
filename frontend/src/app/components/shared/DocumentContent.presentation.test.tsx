@@ -9,6 +9,13 @@ vi.mock("./views/DocxView", () => ({
 }));
 vi.mock("./views/PdfView", () => ({ PdfView: () => <div data-testid="pdf-view" /> }));
 vi.mock("./views/SpreadsheetView", () => ({ SpreadsheetView: () => <div data-testid="spreadsheet-view" /> }));
+vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("@/app/lib/mikeApi")>()),
+    getDocumentAiStatus: vi.fn().mockResolvedValue({
+        ai_draft: false,
+        unresolved_ai: false,
+    }),
+}));
 
 it("shows the KI-Entwurf banner over an unreviewed file without blocking display", () => {
     render(

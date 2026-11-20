@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   uploadFile: vi.fn(),
   deleteSource: vi.fn(),
   enqueueConversion: vi.fn(),
+  pendingEdits: vi.fn(),
 }));
 // Only the verdict is stubbed; canManageDocument stays real so the policy
 // under test is the production one.
@@ -21,6 +22,7 @@ vi.mock("../documents.shared", () => ({
 vi.mock("../../../lib/documentVersions", () => ({
   loadActiveVersion: mocks.active,
   contentSha256: () => "hash",
+  pendingAiEditVersionIds: mocks.pendingEdits,
 }));
 vi.mock("../../../lib/storage", async (importOriginal) => ({
   // StorageOperationError stays real: a test below hands one through.
@@ -81,12 +83,14 @@ beforeEach(() => {
   vi.stubEnv("ASYNC_DOCUMENT_CONVERSION", "true");
   mocks.access.mockResolvedValue(access());
   mocks.active.mockResolvedValue({
+    id: "source-ver",
     storage_path: "source/key",
     pdf_storage_path: "source/pdf",
     filename: "Clause.docx",
     file_type: "docx",
     page_count: 2,
   });
+  mocks.pendingEdits.mockResolvedValue(new Set());
   mocks.downloadFile.mockResolvedValue(new ArrayBuffer(2));
   mocks.deleteSource.mockResolvedValue({ error: null });
 });
@@ -260,6 +264,13 @@ describe("version copy caller policy", () => {
     const fake = db(); // mocks.active's default has no ai_draft -> falsy
     expect(await createVersionFromDocument(args, fake.db)).toMatchObject({ ok: true });
     expect(fake.rpc.mock.calls[0][1].p_version).toMatchObject({ ai_draft: false });
+  });
+
+  it("marks the copy an AI draft when the source has pending KI edits (N32)", async () => {
+    mocks.pendingEdits.mockResolvedValue(new Set(["source-ver"]));
+    const fake = db();
+    expect(await createVersionFromDocument(args, fake.db)).toMatchObject({ ok: true });
+    expect(fake.rpc.mock.calls[0][1].p_version).toMatchObject({ ai_draft: true });
   });
 
   it("queues conversion when the source has no rendition", async () => {

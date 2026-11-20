@@ -21,6 +21,7 @@ import { contentTypeForDocumentType } from "../../lib/documentTypes";
 import { uniqueArchiveFilename } from "../../lib/zipExport";
 import {
     getDocument,
+    getDocumentAiStatus,
     deleteDocument,
     getDisplayableVersion,
     resolveZipExportDocuments,
@@ -54,6 +55,37 @@ documentsRouter.get("/:documentId", requireAuth, asyncRoute(async (req, res) => 
         return void res.status(404).json({ detail: "Document not found" });
     }
     res.json(result.doc);
+}));
+
+// GET /single-documents/:documentId/ai-status
+// Gate B4 audit finding N30/N31: the in-app viewer asks whether this
+// version is an unreviewed AI draft or still has pending KI edits, then
+// loads /display instead of /file.
+documentsRouter.get("/:documentId/ai-status", requireAuth, asyncRoute(async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const versionIdParam =
+        typeof req.query.version_id === "string" ? req.query.version_id : null;
+    const db = createServerSupabase();
+
+    const result = await getDocumentAiStatus(
+        documentId,
+        userId,
+        userEmail,
+        versionIdParam,
+        db,
+    );
+    if (!result.ok) {
+        if (result.kind === "error") return void sendInternalError(res, result.error);
+        if (result.kind === "forbidden")
+            return void res.status(403).json({ detail: "You do not have access to this document." });
+        return void res.status(404).json({ detail: "Document not found" });
+    }
+    res.json({
+        ai_draft: result.ai_draft,
+        unresolved_ai: result.unresolved_ai,
+    });
 }));
 
 // POST /single-documents is intentionally absent: multipart upload was

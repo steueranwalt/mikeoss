@@ -20,10 +20,11 @@ import {
 } from "./types";
 import { DocumentContent, type DocumentContentMode } from "./DocumentContent";
 
-const { viewer, resolveEdit, loadVersions } = vi.hoisted(() => ({
+const { viewer, resolveEdit, loadVersions, loadAiStatus } = vi.hoisted(() => ({
     viewer: vi.fn(),
     resolveEdit: vi.fn(),
     loadVersions: vi.fn(),
+    loadAiStatus: vi.fn(),
 }));
 vi.mock("./views/DocxView", () => ({
     DocxView: (props: unknown) => {
@@ -46,6 +47,7 @@ vi.mock("./views/SpreadsheetView", () => ({
 vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
     ...(await importOriginal<typeof import("@/app/lib/mikeApi")>()),
     getDocument: vi.fn().mockResolvedValue({ can_edit: true, can_delete: true }),
+    getDocumentAiStatus: loadAiStatus,
     resolveDocumentEdit: resolveEdit,
     listDocumentVersions: loadVersions,
 }));
@@ -124,6 +126,7 @@ function viewerProps() {
 }
 beforeEach(() => {
     vi.clearAllMocks();
+    loadAiStatus.mockResolvedValue({ ai_draft: false, unresolved_ai: false });
     Element.prototype.scrollIntoView = vi.fn();
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -350,6 +353,54 @@ it("renders an AI draft as the stamped PDF viewer and banner, not the live docx 
         />,
     );
     expect(screen.getByText("PDF canvas")).toBeVisible();
+    expect(screen.queryByText("DOCX canvas")).toBeNull();
+    expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+});
+
+it.each([
+    { surface: "assistant" as const, showToolbarToggle: true },
+    { surface: "project" as const, showToolbarToggle: false },
+])(
+    "shows the stamped PDF and banner for pending KI edits without ai_draft on the $surface surface (N30/N17-banner)",
+    ({ showToolbarToggle }) => {
+        render(
+            <DocumentContent
+                showToolbarToggle={showToolbarToggle}
+                canEdit
+                document={{
+                    ...panelDocumentFromCitation(citation),
+                    ai_draft: false,
+                    unresolved_ai: true,
+                    version_id: "v1",
+                }}
+                mode={{ kind: "document" }}
+                active
+                onCloseAnnotation={onClose}
+            />,
+        );
+        expect(screen.getByText("PDF canvas")).toBeVisible();
+        expect(screen.queryByText("DOCX canvas")).toBeNull();
+        expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+    },
+);
+
+it("queries the server for AI status when the panel document omitted the flags (N30/N31)", async () => {
+    loadAiStatus.mockResolvedValue({ ai_draft: false, unresolved_ai: true });
+    render(
+        <DocumentContent
+            showToolbarToggle
+            canEdit
+            document={{
+                ...panelDocumentFromCitation(citation),
+                version_id: "v1",
+            }}
+            mode={{ kind: "document" }}
+            active
+            onCloseAnnotation={onClose}
+        />,
+    );
+    await waitFor(() => expect(screen.getByText("PDF canvas")).toBeVisible());
+    expect(loadAiStatus).toHaveBeenCalledWith("doc", "v1");
     expect(screen.queryByText("DOCX canvas")).toBeNull();
     expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
 });

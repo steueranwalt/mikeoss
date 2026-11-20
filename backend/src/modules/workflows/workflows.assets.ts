@@ -15,7 +15,7 @@ import { findDocumentsOutsideWorkspace } from "../../lib/documentWorkspace";
 import { convertedPdfKey } from "../../lib/convert";
 import { storageKey } from "../../lib/storage";
 import { enqueueStorageCleanup } from "../../lib/dbq/enqueue";
-import { attachActiveVersionPaths, attachLatestVersionNumbers } from "../../lib/documentVersions";
+import { attachActiveVersionPaths, attachLatestVersionNumbers, pendingAiEditVersionIds } from "../../lib/documentVersions";
 import { resolveWorkflowAccess, assetsUnsupported } from "./workflows.access";
 
 // --- Assets (assistant workflows only) -------------------------------------
@@ -175,6 +175,15 @@ export async function copyDocumentsToWorkflowAssets(
   ) {
     return { ok: false, kind: "documents_not_ready" };
   }
+  let pendingOnSources: Set<string>;
+  try {
+    pendingOnSources = await pendingAiEditVersionIds(
+      db,
+      sourceVersions.map((version) => version.id as string),
+    );
+  } catch (error) {
+    return { ok: false, kind: "db_error", error };
+  }
 
   const sourceDocumentById = new Map(
     sourceDocuments.map((document) => [document.id, document]),
@@ -253,9 +262,12 @@ export async function copyDocumentsToWorkflowAssets(
           textless_page_count: plan.sourceVersion.textless_page_count,
           content_sha256: plan.sourceVersion.content_sha256,
         }, {
-          // Gate B4 audit finding N25: a workflow-asset copy inherits the
-          // source version's unreviewed AI-draft status.
-          aiDraft: plan.sourceVersion.ai_draft === true,
+          // Gate B4 audit finding N25/N32: a workflow-asset copy inherits
+          // the source version's unreviewed AI status, including pending
+          // tracked changes that are not copied as document_edits.
+          aiDraft:
+            plan.sourceVersion.ai_draft === true ||
+            pendingOnSources.has(plan.sourceVersion.id as string),
         });
       if (error) throw error;
     }

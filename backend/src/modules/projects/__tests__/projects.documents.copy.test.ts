@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   downloadFile: vi.fn(),
   createDocumentVersion: vi.fn(),
   copyDocumentVersionFiles: vi.fn(),
+  pendingEdits: vi.fn(),
 }));
 vi.mock("../../../lib/access", async (original) => ({
   ...(await original<typeof import("../../../lib/access")>()),
@@ -16,6 +17,7 @@ vi.mock("../../../lib/access", async (original) => ({
 vi.mock("../../../lib/documentVersions", async (original) => ({
   ...(await original<typeof import("../../../lib/documentVersions")>()),
   attachActiveVersionPaths: vi.fn(),
+  pendingAiEditVersionIds: mocks.pendingEdits,
 }));
 vi.mock("../../../lib/storage", async (original) => ({
   ...(await original<typeof import("../../../lib/storage")>()),
@@ -46,6 +48,7 @@ beforeEach(() => {
   });
   mocks.createDocumentVersion.mockResolvedValue({ data: { id: "copied-v" }, error: null });
   mocks.copyDocumentVersionFiles.mockResolvedValue({ pdfStoragePath: null });
+  mocks.pendingEdits.mockResolvedValue(new Set());
 });
 
 // What the workspace check reads about the source: where it is filed, its
@@ -233,6 +236,55 @@ it("inherits ai_draft when copying a document into another project (N25)", async
     expect.objectContaining({
       document_id: "copy",
       filename: "Draft.docx",
+    }),
+    { aiDraft: true },
+  );
+  fake.done();
+});
+
+it("marks the copy an AI draft when the source has pending KI edits (N32)", async () => {
+  mocks.docAccess.mockResolvedValue({
+    ok: true,
+    isCreator: true,
+    orgRole: "member",
+    projectRole: "viewer",
+  });
+  mocks.downloadFile.mockResolvedValue(new ArrayBuffer(4));
+  mocks.pendingEdits.mockResolvedValue(new Set(["v1"]));
+  const fake = scriptedDb([
+    { table: "documents", data: firmDoc },
+    ...placementReads,
+    {
+      table: "document_versions",
+      data: {
+        id: "v1",
+        storage_path: "src/key",
+        filename: "Clause.docx",
+        source: "assistant_edit",
+        file_type: "docx",
+        size_bytes: 4,
+        version_number: 1,
+        page_count: null,
+        textless_page_count: null,
+        ai_draft: false,
+      },
+    },
+    { table: "projects", data: { org_id: "firm" } },
+    { table: "documents", op: "insert", data: { id: "copy", status: "ready" } },
+    { table: "documents", data: { id: "copy", status: "ready" } },
+  ]);
+  expect(
+    await assignOrCopyDocument(fake.db, {
+      projectId: "other-firm-matter",
+      documentId: "doc",
+      userId: "actor",
+    }),
+  ).toMatchObject({ ok: true, status: 201 });
+  expect(mocks.createDocumentVersion).toHaveBeenCalledWith(
+    fake.db,
+    expect.objectContaining({
+      document_id: "copy",
+      filename: "Clause.docx",
     }),
     { aiDraft: true },
   );

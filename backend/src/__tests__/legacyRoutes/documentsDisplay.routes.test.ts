@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   loadActiveVersion: vi.fn(),
   downloadFile: vi.fn(),
   downloadFileIfAvailable: vi.fn(),
+  officeBytesToPdf: vi.fn(),
 }));
 
 let pendingEditsCount = 0;
@@ -59,6 +60,11 @@ vi.mock("../../lib/storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/storage")>()),
   downloadFile: mocks.downloadFile,
   downloadFileIfAvailable: mocks.downloadFileIfAvailable,
+}));
+
+vi.mock("../../lib/convert", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/convert")>()),
+  officeBytesToPdf: mocks.officeBytesToPdf,
 }));
 
 import { documentsRouter } from "../../modules/documents/documents.routes";
@@ -121,7 +127,9 @@ describe("GET /single-documents/:documentId/display", () => {
     expect(response.headers["x-mike-ai-draft"]).toBe("1");
   });
 
-  it("refuses an xlsx draft that cannot be stamped as a PDF (N17)", async () => {
+  it("stamps an xlsx draft when the converter returns a PDF (N17/N33)", async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([200, 200]);
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
       storage_path: "documents/user-1/document-1/source.xlsx",
@@ -133,6 +141,31 @@ describe("GET /single-documents/:documentId/display", () => {
       ai_draft: true,
     });
     mocks.downloadFile.mockResolvedValue(Buffer.from("fake xlsx bytes"));
+    mocks.officeBytesToPdf.mockResolvedValue(Buffer.from(await pdf.save()));
+
+    const response = await request(app)
+      .get("/single-documents/document-1/display")
+      .set("Authorization", "Bearer test");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
+    expect(response.headers["content-type"]).toContain("application/pdf");
+  });
+
+  it("refuses an xlsx draft when the converter is missing or fails (N17/N33)", async () => {
+    mocks.loadActiveVersion.mockResolvedValue({
+      id: "version-1",
+      storage_path: "documents/user-1/document-1/source.xlsx",
+      pdf_storage_path: null,
+      version_number: 1,
+      filename: "financials.xlsx",
+      source: "tool_write",
+      file_type: "xlsx",
+      ai_draft: true,
+    });
+    mocks.downloadFile.mockResolvedValue(Buffer.from("fake xlsx bytes"));
+    mocks.officeBytesToPdf.mockRejectedValue(new Error("soffice not installed"));
 
     const response = await request(app)
       .get("/single-documents/document-1/display")

@@ -15,7 +15,11 @@ import type { Citation, EditAnnotation, PanelDocument } from "./types";
 import { quoteVerificationState } from "../assistant/message/citationVerification";
 import { CaseView } from "../assistant/CaseView";
 import { useResolvedPanelDocument } from "../assistant/useResolvedPanelDocument";
-import { approveAiDraftVersion, type DocumentVersion } from "@/app/lib/mikeApi";
+import {
+    approveAiDraftVersion,
+    getDocumentAiStatus,
+    type DocumentVersion,
+} from "@/app/lib/mikeApi";
 import { DocumentTitleRow } from "./DocumentTitleRow";
 import { DocumentAnnotationLayer } from "./DocumentAnnotationLayer";
 import { AiDraftBanner } from "./AiDraftBanner";
@@ -157,20 +161,43 @@ export function DocumentContent({
         null;
     const draftKey = `${documentId}:${versionId ?? ""}`;
     const [serverAiDraft, setServerAiDraft] = useState(false);
-    // Gate B4 N17/N27: banner from the version's AI status, open edits, or
-    // /display's X-Mike-Ai-Draft. KI drafts themselves render as a stamped
-    // PDF; pending-edit docx stays on DocxView so the highlight still works.
+    const [fetchedAiStatus, setFetchedAiStatus] = useState<{
+        ai_draft: boolean;
+        unresolved_ai: boolean;
+    } | null>(null);
+    useEffect(() => {
+        if (!documentId || documentId.startsWith("case:") || !versionId) {
+            setFetchedAiStatus(null);
+            return;
+        }
+        let cancelled = false;
+        void getDocumentAiStatus(documentId, versionId)
+            .then((status) => {
+                if (!cancelled) setFetchedAiStatus(status);
+            })
+            .catch(() => {
+                if (!cancelled) setFetchedAiStatus(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [documentId, versionId]);
+    // Gate B4 N17/N27/N30: banner and stamped PDF from the version's AI
+    // status, open edits, or /display's X-Mike-Ai-Draft. The viewer queries
+    // the server rather than trusting flags the panel document happened to
+    // carry (chat tabs often omit them).
+    const isUnresolvedAi =
+        resolvedDocument.ai_draft === true ||
+        resolvedDocument.unresolved_ai === true ||
+        fetchedAiStatus?.ai_draft === true ||
+        fetchedAiStatus?.unresolved_ai === true ||
+        serverAiDraft;
     const showAiDraft =
-        (resolvedDocument.ai_draft === true ||
-            resolvedDocument.unresolved_ai === true ||
-            serverAiDraft ||
-            mode.kind === "edit") &&
+        (isUnresolvedAi || mode.kind === "edit") &&
         approvedDraftKey !== draftKey &&
         !!versionId;
     const useStampedPdfViewer =
-        (resolvedDocument.ai_draft === true || serverAiDraft) &&
-        approvedDraftKey !== draftKey &&
-        !!versionId;
+        isUnresolvedAi && approvedDraftKey !== draftKey && !!versionId;
     const isCase = resolvedDocument.type === "case";
     const viewType = resolveDocumentViewType({
         filename: resolvedDocument.title,

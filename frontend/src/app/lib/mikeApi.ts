@@ -2772,6 +2772,8 @@ export interface DocumentVersion {
     deleted_by?: string | null;
     /** Gate B4: this version is an unreviewed AI draft. */
     ai_draft?: boolean;
+    /** Gate B4 N31: pending KI edits or an unreviewed draft. */
+    unresolved_ai?: boolean;
 }
 
 export async function listDocumentVersions(documentId: string): Promise<{
@@ -2954,6 +2956,20 @@ export async function uploadStandaloneDocuments(
 export async function getDocument(documentId: string, isCurrentAccount?: () => boolean,
 ): Promise<Document> {
     return apiRequest<Document>("documents.directory", `/single-documents/${documentId}`, undefined, isCurrentAccount);
+}
+
+/** Gate B4 audit finding N30/N31: whether this version is an unreviewed AI draft or still has pending KI edits. */
+export async function getDocumentAiStatus(
+    documentId: string,
+    versionId?: string | null,
+): Promise<{ ai_draft: boolean; unresolved_ai: boolean }> {
+    const params = versionId
+        ? `?version_id=${encodeURIComponent(versionId)}`
+        : "";
+    return apiRequest(
+        "documents.directory",
+        `/single-documents/${encodeURIComponent(documentId)}/ai-status${params}`,
+    );
 }
 
 export async function deleteDocument(documentId: string): Promise<void> {

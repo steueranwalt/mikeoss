@@ -39,17 +39,38 @@ async function wrapImageAsPdf(bytes: Buffer, fileType: string): Promise<Buffer> 
   return Buffer.from(await pdf.save());
 }
 
+export function stripHtmlForDisplay(raw: string): string {
+  return raw
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ");
+}
+
 async function wrapTextAsPdf(bytes: Buffer): Promise<Buffer> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Courier);
   const page = pdf.addPage([612, 792]);
-  const text = bytes.toString("utf8").replace(/<[^>]+>/g, " ");
+  const text = stripHtmlForDisplay(bytes.toString("utf8"));
   const lines = text.split(/\r?\n/);
   let y = 760;
+  let truncated = false;
   for (const line of lines) {
+    if (y < 48) {
+      truncated = true;
+      break;
+    }
     page.drawText(line.slice(0, 110), { x: 36, y, size: 9, font });
     y -= 12;
-    if (y < 36) break;
+  }
+  if (truncated) {
+    page.drawText("weitere Seiten nicht dargestellt", {
+      x: 36,
+      y: 24,
+      size: 9,
+      font,
+    });
   }
   return Buffer.from(await pdf.save());
 }
