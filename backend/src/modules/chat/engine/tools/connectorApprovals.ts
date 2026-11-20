@@ -1,8 +1,10 @@
 import { teamOrgIdOf } from "../../../../lib/personalOrgs";
 // Connector write approvals inside the assistant turn.
 //
-// A connector whose "Ask for permission for write actions" setting is on does
-// not run a write tool when the model calls it. The dispatcher turns the call
+// Gate B4: every write-capable connector action pauses for the user's
+// approval before it runs — this is not a per-connector setting the owner
+// can turn off (see mcp/servers.ts's planMcpToolCall, lib/integrations/
+// googleDrive.ts and googleWorkspace.ts). The dispatcher turns the call
 // into an `approval` item on an ask_inputs event and the turn pauses, exactly
 // like a question. The user's decision arrives as an ask_inputs_response; the
 // same one-step append that makes answers single-use records it, and only
@@ -55,8 +57,13 @@ export async function planConnectorToolCall(
   return { type: "run" };
 }
 
+// Gate B4 audit finding L6: this message used to also suggest turning off
+// "Ask for permission for write actions" for the connector — a setting that
+// no longer exists anywhere a user (or this message) can reach (see the
+// Gate B4 comment above). Approval is always required, so the only real
+// option left is running the action from a surface that can ask for it.
 export const APPROVAL_UNAVAILABLE_MESSAGE =
-  'This connector asks for permission before write actions, and approvals are only available in the Mike assistant. Tell the user to run this from the Mike assistant, or to turn off "Ask for permission for write actions" for this connector in Settings → Connectors.';
+  "This connector action needs the user's approval before it runs, and approvals are only available in the Mike assistant. Tell the user to run this from the Mike assistant instead.";
 
 function isApprovalItem(
   item: AskInputsEvent["items"][number],
