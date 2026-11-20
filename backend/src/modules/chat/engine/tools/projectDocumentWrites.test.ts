@@ -195,7 +195,11 @@ describe("writeProjectDocument", () => {
     });
 
     const result = await writeProjectDocument(
-      input({ content: '{"cites": [1]}', approved: true }),
+      input({
+        content: '{"cites": [1]}',
+        approved: true,
+        expectedVersionId: "version-existing",
+      }),
       db as never,
     );
 
@@ -258,20 +262,32 @@ describe("writeProjectDocument", () => {
     expect(calls.filter((call) => call.op !== "select")).toEqual([]);
   });
 
-  it("proceeds without checking staleness when the approved replay carries no expectedVersionId", async () => {
-    // Legacy-compatibility path (pre-N18 callers never set this field).
-    const { db } = database({
+  it("refuses an approved overwrite with a missing or empty expectedVersionId (N18-rest)", async () => {
+    const { db, calls } = database({
       filename: "cites.json",
       source: "tool_write",
+      versionId: "version-existing",
       versionNumber: 2,
     });
 
-    const result = await writeProjectDocument(
+    const missing = await writeProjectDocument(
       input({ content: '{"cites": [1]}', approved: true }),
       db as never,
     );
+    expect(missing).toMatchObject({
+      ok: false,
+      error: "approval_stale",
+    });
 
-    expect(result).toMatchObject({ ok: true, created: "version" });
+    const empty = await writeProjectDocument(
+      input({ content: '{"cites": [1]}', approved: true, expectedVersionId: "" }),
+      db as never,
+    );
+    expect(empty).toMatchObject({
+      ok: false,
+      error: "approval_stale",
+    });
+    expect(calls.filter((call) => call.op !== "select")).toEqual([]);
   });
 
   it("refuses a filename belonging to a document it did not write", async () => {

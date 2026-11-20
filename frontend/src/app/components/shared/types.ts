@@ -136,6 +136,8 @@ export interface Document {
   latest_version_number?: number | null;
   /** Gate B4: the active version is an unreviewed AI draft. */
   ai_draft?: boolean;
+  /** Gate B4 N27: pending AI edits or an unreviewed draft. */
+  unresolved_ai?: boolean;
 }
 
 export type PanelDocumentType = SourceDocumentType;

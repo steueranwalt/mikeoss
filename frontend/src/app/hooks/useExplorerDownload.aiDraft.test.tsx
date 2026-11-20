@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { getDocumentUrl, MikeApiError } from "@/app/lib/mikeApi";
-import type { Document } from "@/app/components/shared/types";
+import { downloadDocumentsZip, getDocumentUrl, MikeApiError } from "@/app/lib/mikeApi";
+import type { Document, Folder } from "@/app/components/shared/types";
 import { useExplorerDownload } from "./useExplorerDownload";
 
 vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
@@ -76,4 +76,56 @@ it("opens the export dialog on unresolved_ai_edits and retries with confirm_toke
     expect(downloads).toEqual([
         { href: "https://files.example/stamped", filename: "Draft.docx" },
     ]);
+});
+
+it("opens the export dialog for a folder zip 409 and retries with confirm_tokens (N26)", async () => {
+    vi.mocked(downloadDocumentsZip)
+        .mockRejectedValueOnce(
+            new MikeApiError({
+                message: "This selection has AI-proposed changes.",
+                status: 409,
+                code: "unresolved_ai_edits",
+                details: {
+                    documents: [
+                        {
+                            document_id: "doc-1",
+                            filename: "one.docx",
+                            confirm_token: "token-1",
+                        },
+                    ],
+                },
+            }),
+        )
+        .mockResolvedValueOnce(new Blob(["zip"]));
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:zip");
+    function Harness() {
+        const value = useExplorerDownload();
+        return (
+            <>
+                <button
+                    type="button"
+                    onClick={() =>
+                        void value.downloadFolder({
+                            id: "folder-1",
+                            name: "Folder",
+                        } as Folder)
+                    }
+                >
+                    Zip
+                </button>
+                {value.confirmation}
+            </>
+        );
+    }
+    render(<Harness />);
+    await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Zip" }));
+    });
+    expect(await screen.findByRole("dialog")).toHaveTextContent("one.docx");
+    await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Export anyway" }));
+    });
+    expect(downloadDocumentsZip).toHaveBeenLastCalledWith([], ["folder-1"], {
+        "doc-1": "token-1",
+    });
 });

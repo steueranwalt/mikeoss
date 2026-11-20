@@ -9,7 +9,24 @@ import {
   assertStorageConfigured,
   deleteFile,
   extractedTextKey,
+  listFiles,
 } from "../../lib/storage";
+
+/** Gate B4 audit finding N22-rest: stamped throwaway copies live under this prefix, not in document_versions. */
+async function stampedAiDraftCopyKeys(documentIds: string[]): Promise<string[]> {
+  const keys: string[] = [];
+  for (const documentId of documentIds) {
+    try {
+      keys.push(...(await listFiles(`exports/ai-draft-stamped/${documentId}/`)));
+    } catch (error) {
+      logError("documents/inline-cleanup", error, {
+        phase: "capture-stamped",
+        documentId,
+      });
+    }
+  }
+  return keys;
+}
 
 /**
  * How many sibling rows one run may absorb. The trigger writes one row per
@@ -249,22 +266,42 @@ export async function captureInlineDocumentCleanup(
     | { projectIds: string[] }
     | { workflowId: string },
 ): Promise<string[]> {
-  if (process.env.DB_JOBS_ENABLED !== "false") return [];
+  // Gate B4 audit finding N22-rest: stamped copies are not version rows, so
+  // the trigger never records them. Capture them here on bulk document
+  // deletes (not version-only deletes) even when workers are enabled, so
+  // completeInlineDocumentCleanup removes them immediately rather than
+  // waiting on each copy's delayed job.
+  const stampedDocumentIds = async (): Promise<string[]> => {
+    if ("versionIds" in scope) return [];
+    if ("documentIds" in scope) return scope.documentIds;
+    const query = db.from("documents").select("id");
+    const { data, error } =
+      "projectIds" in scope
+        ? await query.in("project_id", scope.projectIds)
+        : await query.eq("workflow_id", scope.workflowId);
+    if (error) throw error;
+    return (data ?? []).map((row) => row.id as string);
+  };
+
+  if (process.env.DB_JOBS_ENABLED !== "false") {
+    try {
+      return await stampedAiDraftCopyKeys(await stampedDocumentIds());
+    } catch (err) {
+      logError("documents/inline-cleanup", err, { phase: "capture-stamped" });
+      return [];
+    }
+  }
   try {
     assertStorageConfigured();
     let ids: string[];
     if ("documentIds" in scope) ids = scope.documentIds;
     else if ("versionIds" in scope) ids = scope.versionIds;
     else {
-      const query = db.from("documents").select("id");
-      const { data, error } =
-        "projectIds" in scope
-          ? await query.in("project_id", scope.projectIds)
-          : await query.eq("workflow_id", scope.workflowId);
-      if (error) throw error;
-      ids = (data ?? []).map((row) => row.id as string);
+      ids = await stampedDocumentIds();
     }
-    const keys = new Set<string>();
+    const keys = new Set<string>(
+      "versionIds" in scope ? [] : await stampedAiDraftCopyKeys(ids),
+    );
     // `in(...)` travels in the request URL; 50 uuids stay well under the
     // gateway's limit (500 did not — see deleteCleanupKeys).
     for (let start = 0; start < ids.length; start += 50) {

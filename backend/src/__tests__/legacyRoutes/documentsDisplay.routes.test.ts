@@ -1,11 +1,12 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PDFDocument } from "pdf-lib";
 
 // Gate B4 audit finding N17: /display never requires confirmation (a
-// display, not an export — same decision as /file's ?purpose=display, Gate
-// B4 audit finding N20), but the PDF rendition of an AI draft carries the
-// banner and must be answered with Cache-Control: no-store.
+// display, not an export). An unapproved AI draft is a stamped PDF (or
+// refused). Cache-Control: no-store and X-Mike-Ai-Draft tell the viewer
+// not to cache and to show the banner.
 const mocks = vi.hoisted(() => ({
   ensureDocAccess: vi.fn(),
   loadActiveVersion: vi.fn(),
@@ -94,8 +95,33 @@ describe("GET /single-documents/:documentId/display", () => {
     expect(response.headers["cache-control"]).toBeUndefined();
   });
 
-  it("serves an unapproved AI draft with Cache-Control: no-store, unconfirmed", async () => {
+  it("serves an unapproved AI draft PDF with Cache-Control: no-store, unconfirmed", async () => {
+    const pdf = await PDFDocument.create();
+    pdf.addPage([200, 200]);
     pendingEditsCount = 1;
+    mocks.loadActiveVersion.mockResolvedValue({
+      id: "version-1",
+      storage_path: "documents/user-1/document-1/source.pdf",
+      pdf_storage_path: null,
+      version_number: 1,
+      filename: "brief.pdf",
+      source: "tool_write",
+      file_type: "pdf",
+      ai_draft: true,
+    });
+    mocks.downloadFile.mockResolvedValue(Buffer.from(await pdf.save()));
+
+    const response = await request(app)
+      .get("/single-documents/document-1/display")
+      .set("Authorization", "Bearer test");
+
+    // No confirm_token was sent, and the response is served anyway (200, not 409).
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
+  });
+
+  it("refuses an xlsx draft that cannot be stamped as a PDF (N17)", async () => {
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
       storage_path: "documents/user-1/document-1/source.xlsx",
@@ -112,8 +138,7 @@ describe("GET /single-documents/:documentId/display", () => {
       .get("/single-documents/document-1/display")
       .set("Authorization", "Bearer test");
 
-    // No confirm_token was sent, and the response is served anyway (200, not 409).
-    expect(response.status).toBe(200);
-    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("stamping_failed");
   });
 });

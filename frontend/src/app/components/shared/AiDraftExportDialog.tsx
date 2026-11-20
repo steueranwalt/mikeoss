@@ -1,7 +1,10 @@
 "use client";
 
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
-import type { UnresolvedAiEditsDetails } from "@/app/lib/aiDraftConfirmation";
+import type {
+    UnresolvedAiEditsDetails,
+    UnresolvedAiEditsZipDocument,
+} from "@/app/lib/aiDraftConfirmation";
 
 /**
  * Gate B4 audit finding N12: export confirmation is bound to the version
@@ -11,12 +14,14 @@ import type { UnresolvedAiEditsDetails } from "@/app/lib/aiDraftConfirmation";
 export function AiDraftExportDialog({
     open,
     details,
+    zipDocuments = null,
     confirming = false,
     onConfirm,
     onCancel,
 }: {
     open: boolean;
     details: UnresolvedAiEditsDetails | null;
+    zipDocuments?: UnresolvedAiEditsZipDocument[] | null;
     confirming?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
@@ -28,13 +33,31 @@ export function AiDraftExportDialog({
             ? `${pendingCount} pending AI-proposed edit${pendingCount === 1 ? "" : "s"}`
             : null,
     ].filter((part): part is string => part != null);
+    const zipNames = zipDocuments?.map((doc) => doc.filename) ?? [];
 
     return (
         <ConfirmPopup
             open={open}
             title="Export AI draft?"
             message={
-                details ? (
+                zipDocuments && zipDocuments.length > 0 ? (
+                    <div className="space-y-2">
+                        <p>
+                            {zipDocuments.length === 1
+                                ? "One selected file is an unapproved AI draft or has pending AI-proposed edits."
+                                : `${zipDocuments.length} selected files are unapproved AI drafts or have pending AI-proposed edits.`}{" "}
+                            Exporting marks those copies as AI drafts. Confirming
+                            is bound to each file's confirm_token.
+                        </p>
+                        <ul className="list-disc space-y-1 pl-4 font-mono text-[11px] text-gray-600">
+                            {zipNames.map((name) => (
+                                <li key={name} className="break-all">
+                                    {name}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                ) : details ? (
                     <div className="space-y-2">
                         <p>
                             This file has {reasons.join(" and ")}. Exporting

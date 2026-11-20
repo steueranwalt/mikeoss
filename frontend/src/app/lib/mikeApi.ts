@@ -3052,9 +3052,9 @@ function documentFilePath(
 }
 
 // Gate B4 audit finding N20: the in-app docx/spreadsheet viewer reads raw
-// bytes to render inline — it is a display, not an export, so it must never
-// be blocked by the AI-draft/unresolved-edit confirmation gate the way an
-// actual download is. ?purpose=display tells the backend so.
+// bytes to render inline. Gate B4 audit finding N23: /file no longer
+// exempts purpose=display for AI drafts — viewers of drafts load /display
+// instead. This helper is the DocxView path for non-draft files.
 export function getDocumentFileUrl(
     documentId: string,
     versionId?: string | null,
@@ -3089,6 +3089,7 @@ export async function getDocumentFile(
 export async function downloadDocumentsZip(
     documentIds: string[],
     folderIds: string[] = [],
+    confirmTokens?: Record<string, string>,
 ): Promise<Blob> {
     const response = await apiFetch(
         `${API_BASE}/single-documents/download-zip`,
@@ -3101,6 +3102,7 @@ export async function downloadDocumentsZip(
             body: JSON.stringify({
                 document_ids: documentIds,
                 folder_ids: folderIds,
+                ...(confirmTokens ? { confirm_tokens: confirmTokens } : {}),
             }),
         }, "documents.directory",
     );

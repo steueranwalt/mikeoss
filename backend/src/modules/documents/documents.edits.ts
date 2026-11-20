@@ -73,12 +73,20 @@ export async function aiDraftConfirmationState(
 ): Promise<AiDraftConfirmationState | null> {
     const targetVersion = await loadActiveVersion(documentId, db, versionId);
     if (!targetVersion) return null;
-    const { data: pendingEdits } = await db
+    const { data: pendingEdits, error: pendingEditsError } = await db
         .from("document_edits")
         .select("id")
         .eq("version_id", targetVersion.id)
         .eq("status", "pending")
         .order("id", { ascending: true });
+    // Gate B4 audit finding N28: a failed pending-edits read is a refusal,
+    // not "there are none". Treating `error` as an empty list would let an
+    // export skip confirmation while unresolved edits still exist.
+    if (pendingEditsError) {
+        throw pendingEditsError instanceof Error
+            ? pendingEditsError
+            : new Error("Failed to read pending document_edits");
+    }
     const pendingEditIds = ((pendingEdits ?? []) as { id: string }[]).map((row) => row.id);
     const aiDraft = targetVersion.ai_draft === true;
     if (pendingEditIds.length === 0 && !aiDraft) return null;

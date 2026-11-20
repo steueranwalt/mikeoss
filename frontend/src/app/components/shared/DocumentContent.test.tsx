@@ -327,9 +327,32 @@ describe.each(["assistant", "project"] as const)(
                 }),
             );
             expect(resolveEdit).toHaveBeenCalledWith("doc", "edit", "accept");
+            expect(
+                screen.getByText("KI-Entwurf, nicht freigegeben"),
+            ).toBeVisible();
         });
     },
 );
+
+it("renders an AI draft as the stamped PDF viewer and banner, not the live docx canvas (N17/N24)", () => {
+    render(
+        <DocumentContent
+            showToolbarToggle
+            canEdit
+            document={{
+                ...panelDocumentFromCitation(citation),
+                ai_draft: true,
+                version_id: "v1",
+            }}
+            mode={{ kind: "document" }}
+            active
+            onCloseAnnotation={onClose}
+        />,
+    );
+    expect(screen.getByText("PDF canvas")).toBeVisible();
+    expect(screen.queryByText("DOCX canvas")).toBeNull();
+    expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+});
 
 it("opens a case citation in the IDE with the same opinion and quote section", () => {
     const document = {

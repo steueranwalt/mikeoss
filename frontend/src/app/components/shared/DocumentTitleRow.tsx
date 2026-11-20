@@ -150,6 +150,7 @@ export function DocumentTitleRow({
                             filename={document.title}
                             isReloading={isReloading}
                             onDownload={onDownload}
+                            forceServerExport={showAiDraft}
                         />
                     )}
                     {(document.actions ?? []).map((action, index) =>
@@ -340,12 +341,15 @@ function DownloadButton({
     filename,
     isReloading,
     onDownload,
+    forceServerExport,
 }: {
     documentId: string;
     versionId: string | null;
     filename: string;
     isReloading?: boolean;
     onDownload?: () => Promise<void> | undefined;
+    /** Gate B4 audit finding N24: AI drafts never take the live viewer bytes. */
+    forceServerExport?: boolean;
 }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -356,10 +360,12 @@ function DownloadButton({
         setBusy(true);
         setError(null);
         try {
-            const localDownload = onDownload?.();
-            if (localDownload) {
-                await localDownload;
-                return;
+            if (!forceServerExport) {
+                const localDownload = onDownload?.();
+                if (localDownload) {
+                    await localDownload;
+                    return;
+                }
             }
             await confirmExport((confirmToken) =>
                 downloadDocumentFile(documentId, versionId, filename, confirmToken),

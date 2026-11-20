@@ -2250,9 +2250,9 @@ describe("tabular cell operations", () => {
 });
 
 describe("query and payload defaults", () => {
-    // Gate B4 audit finding N20: the in-app viewer (getDocumentFileUrl)
-    // always marks itself ?purpose=display, so the backend never blocks it
-    // with the AI-draft confirmation gate that an actual export goes through.
+    // DocxView still requests /file?purpose=display. Gate B4 N23: the
+    // backend no longer exempts that query for AI drafts; this helper is
+    // only the URL builder.
     it("getDocumentFile appends version_id only when a version is requested", async () => {
         expect(getDocumentFileUrl("d 1")).toBe(
             `${API_BASE}/single-documents/d%201/file?purpose=display`,

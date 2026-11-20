@@ -62,6 +62,11 @@ export type SourceDocument = {
   version_number?: number | null;
   /** Gate B4: the version being shown is an unreviewed AI draft. */
   ai_draft?: boolean;
+  /**
+   * Gate B4 audit finding N27: true when the version has pending AI-proposed
+   * edits or is an unreviewed draft — the same condition /display uses.
+   */
+  unresolved_ai?: boolean;
 };
 
 /**

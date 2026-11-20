@@ -297,21 +297,27 @@ export async function writeProjectDocument(
     };
   }
 
-  // Gate B4 audit finding N18: an approved replay is refused outright if the
-  // document moved on since the approval was requested — the approval
-  // reviewed a specific version's overwrite, not "whatever is current now".
-  if (
-    existing &&
-    input.approved &&
-    input.expectedVersionId &&
-    existing.versionId !== input.expectedVersionId
-  ) {
-    return {
-      ok: false,
-      error: "approval_stale",
-      detail: `'${filename}' changed after this overwrite was approved. Ask the user to approve it again.`,
-      pending_overwrite: { document_id: existing.documentId, version_id: existing.versionId },
-    };
+  // Gate B4 audit finding N18 / N18-rest: an approved replay must name the
+  // version that was reviewed. An empty or missing version_id is refused
+  // rather than skipping the stale check (which would overwrite whatever is
+  // current now).
+  if (existing && input.approved) {
+    if (!input.expectedVersionId) {
+      return {
+        ok: false,
+        error: "approval_stale",
+        detail: `'${filename}' cannot be overwritten from this approval because it is not bound to a version. Ask the user to approve it again.`,
+        pending_overwrite: { document_id: existing.documentId, version_id: existing.versionId },
+      };
+    }
+    if (existing.versionId !== input.expectedVersionId) {
+      return {
+        ok: false,
+        error: "approval_stale",
+        detail: `'${filename}' changed after this overwrite was approved. Ask the user to approve it again.`,
+        pending_overwrite: { document_id: existing.documentId, version_id: existing.versionId },
+      };
+    }
   }
 
   const documentId = existing?.documentId ?? randomUUID();

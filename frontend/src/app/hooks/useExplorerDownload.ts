@@ -13,7 +13,7 @@ export function useExplorerDownload() {
     const busyRef = useRef(false);
     const [downloading, setDownloading] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const { confirmExport, dialog } = useAiDraftExport();
+    const { confirmExport, confirmZipExport, dialog } = useAiDraftExport();
 
     async function download(target: {
         kind: "document" | "folder";
@@ -38,7 +38,11 @@ export function useExplorerDownload() {
                 url = file.url;
                 filename = file.filename || filename;
             } else {
-                const archive = await downloadDocumentsZip([], [target.id]);
+                const archive = await confirmZipExport((confirmTokens) =>
+                    confirmTokens
+                        ? downloadDocumentsZip([], [target.id], confirmTokens)
+                        : downloadDocumentsZip([], [target.id]),
+                );
                 objectUrl = URL.createObjectURL(archive);
                 url = objectUrl;
             }

@@ -458,7 +458,7 @@ export function DocTable({
     const [addDocsOpen, setAddDocsOpen] = useState(false);
     const { user } = useAuth();
     const ownProfile = useOptionalUserProfile()?.profile;
-    const { confirmExport, dialog: aiDraftExportDialog } = useAiDraftExport();
+    const { confirmExport, confirmZipExport, dialog: aiDraftExportDialog } = useAiDraftExport();
     const [clearedAiDraftDocIds, setClearedAiDraftDocIds] = useState(
         () => new Set<string>(),
     );
@@ -3412,9 +3412,17 @@ export function DocTable({
                           document_ids: selectedStandaloneDocIds,
                       })
                     : {
-                          blob: await downloadDocumentsZip(
-                              selectedStandaloneDocIds,
-                              selectedFolderRootIds,
+                          blob: await confirmZipExport((confirmTokens) =>
+                              confirmTokens
+                                  ? downloadDocumentsZip(
+                                        selectedStandaloneDocIds,
+                                        selectedFolderRootIds,
+                                        confirmTokens,
+                                    )
+                                  : downloadDocumentsZip(
+                                        selectedStandaloneDocIds,
+                                        selectedFolderRootIds,
+                                    ),
                           ),
                           filename: null,
                       };
@@ -3424,6 +3432,7 @@ export function DocTable({
             a.click();
             URL.revokeObjectURL(a.href);
         } catch (error) {
+            if (error instanceof AiDraftExportCancelled) return;
             notifyError(error, {
                 action: "download the selected files",
                 fallback:
@@ -3433,7 +3442,12 @@ export function DocTable({
                 },
             });
         }
-    }, [downloadDoc, selectedFolderRootIds, selectedStandaloneDocIds]);
+    }, [
+        confirmZipExport,
+        downloadDoc,
+        selectedFolderRootIds,
+        selectedStandaloneDocIds,
+    ]);
 
     // Takes the ids explicitly so a "Retry" can re-run exactly the rows that
     // failed. Reading the selection again would resend the whole original

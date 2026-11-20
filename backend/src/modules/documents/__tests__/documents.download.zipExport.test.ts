@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   ensureDocAccess: vi.fn(),
   headFile: vi.fn(),
+  downloadFile: vi.fn(),
   loadActiveVersion: vi.fn(),
+  stampAiDraftBytes: vi.fn(),
 }));
 
 vi.mock("../../../lib/access", async (importOriginal) => ({
@@ -14,6 +16,12 @@ vi.mock("../../../lib/access", async (importOriginal) => ({
 vi.mock("../../../lib/storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../lib/storage")>()),
   headFile: mocks.headFile,
+  downloadFile: mocks.downloadFile,
+}));
+
+vi.mock("../../../lib/aiDraftWatermark", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../lib/aiDraftWatermark")>()),
+  stampAiDraftBytes: mocks.stampAiDraftBytes,
 }));
 
 vi.mock("../../../lib/documentVersions", async (importOriginal) => ({
@@ -162,6 +170,44 @@ describe("resolveZipExportDocuments (Gate B4 audit finding N4)", () => {
     // Fail-closed: headFile (and therefore the archive) never runs once any
     // document in the batch needs confirmation.
     expect(mocks.headFile).not.toHaveBeenCalled();
+  });
+
+  it("retries a confirmed draft with confirm_tokens and stamps the zip bytes (N26)", async () => {
+    mocks.loadActiveVersion.mockImplementation(async (documentId: string) => {
+      if (documentId === "doc-1") {
+        return { id: "version-1", ai_draft: true, storage_path: "documents/user-1/doc-1/source.docx" };
+      }
+      return { id: "version-2", ai_draft: false, storage_path: "documents/user-1/doc-2/source.docx" };
+    });
+    const refused = await resolveZipExportDocuments(
+      { documentIds: ["doc-1", "doc-2"], folderIds: [], userId: "user-1", userEmail: "u@example.com" },
+      makeDatabase() as never,
+    );
+    expect(refused.ok).toBe(false);
+    if (refused.ok || refused.kind !== "confirmation_required") {
+      throw new Error(`expected confirmation_required, got ${JSON.stringify(refused)}`);
+    }
+    const token = refused.documents[0].confirm_token;
+    mocks.downloadFile.mockResolvedValue(Buffer.from("docx-bytes"));
+    mocks.stampAiDraftBytes.mockResolvedValue(Buffer.from("stamped-docx"));
+
+    const result = await resolveZipExportDocuments(
+      {
+        documentIds: ["doc-1", "doc-2"],
+        folderIds: [],
+        userId: "user-1",
+        userEmail: "u@example.com",
+        confirmTokens: { "doc-1": token },
+      },
+      makeDatabase() as never,
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const stamped = result.entries.find((entry) => entry.filename.includes("one"));
+      expect(stamped?.bytes?.toString()).toBe("stamped-docx");
+      expect(mocks.stampAiDraftBytes).toHaveBeenCalledWith("docx", Buffer.from("docx-bytes"));
+    }
   });
 
   it("refuses the whole batch when one document has pending tracked-change edits", async () => {

@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   projectAccess: vi.fn(),
   docAccess: vi.fn(),
   downloadFile: vi.fn(),
+  createDocumentVersion: vi.fn(),
+  copyDocumentVersionFiles: vi.fn(),
 }));
 vi.mock("../../../lib/access", async (original) => ({
   ...(await original<typeof import("../../../lib/access")>()),
@@ -18,6 +20,11 @@ vi.mock("../../../lib/documentVersions", async (original) => ({
 vi.mock("../../../lib/storage", async (original) => ({
   ...(await original<typeof import("../../../lib/storage")>()),
   downloadFile: mocks.downloadFile,
+}));
+vi.mock("../../documents/documents.service", async (original) => ({
+  ...(await original<typeof import("../../documents/documents.service")>()),
+  createDocumentVersion: mocks.createDocumentVersion,
+  copyDocumentVersionFiles: mocks.copyDocumentVersionFiles,
 }));
 import { assignOrCopyDocument } from "../projects.service";
 
@@ -37,6 +44,8 @@ beforeEach(() => {
     projectRole: "owner",
     project: { org_id: "firm" },
   });
+  mocks.createDocumentVersion.mockResolvedValue({ data: { id: "copied-v" }, error: null });
+  mocks.copyDocumentVersionFiles.mockResolvedValue({ pdfStoragePath: null });
 });
 
 // What the workspace check reads about the source: where it is filed, its
@@ -180,5 +189,52 @@ it.each([
   mocks.downloadFile.mockRejectedValueOnce(error);
   expect(await assignOrCopyDocument(fake.db, { projectId: "destination", documentId: "doc", userId: "actor" }))
     .toEqual({ ok: false, kind: "read_failed", error });
+  fake.done();
+});
+
+it("inherits ai_draft when copying a document into another project (N25)", async () => {
+  mocks.docAccess.mockResolvedValue({
+    ok: true,
+    isCreator: true,
+    orgRole: "member",
+    projectRole: "viewer",
+  });
+  mocks.downloadFile.mockResolvedValue(new ArrayBuffer(4));
+  const fake = scriptedDb([
+    { table: "documents", data: firmDoc },
+    ...placementReads,
+    {
+      table: "document_versions",
+      data: {
+        storage_path: "src/key",
+        filename: "Draft.docx",
+        source: "generated",
+        file_type: "docx",
+        size_bytes: 4,
+        version_number: 1,
+        page_count: null,
+        textless_page_count: null,
+        ai_draft: true,
+      },
+    },
+    { table: "projects", data: { org_id: "firm" } },
+    { table: "documents", op: "insert", data: { id: "copy", status: "ready" } },
+    { table: "documents", data: { id: "copy", status: "ready" } },
+  ]);
+  expect(
+    await assignOrCopyDocument(fake.db, {
+      projectId: "other-firm-matter",
+      documentId: "doc",
+      userId: "actor",
+    }),
+  ).toMatchObject({ ok: true, status: 201 });
+  expect(mocks.createDocumentVersion).toHaveBeenCalledWith(
+    fake.db,
+    expect.objectContaining({
+      document_id: "copy",
+      filename: "Draft.docx",
+    }),
+    { aiDraft: true },
+  );
   fake.done();
 });

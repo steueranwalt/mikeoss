@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { MikeApiError } from "./mikeApi";
-import { unresolvedAiEditsFromError } from "./aiDraftConfirmation";
+import {
+    unresolvedAiEditsFromError,
+    unresolvedAiEditsZipFromError,
+} from "./aiDraftConfirmation";
 
 function error(overrides: Partial<ConstructorParameters<typeof MikeApiError>[0]> = {}) {
     return new MikeApiError({
@@ -47,6 +50,32 @@ describe("unresolvedAiEditsFromError", () => {
                 }),
             ),
         ).toBeNull();
+    });
+
+    it("reads a zip-batch 409's per-document confirm_tokens (N26)", () => {
+        expect(
+            unresolvedAiEditsZipFromError(
+                error({
+                    details: {
+                        documents: [
+                            {
+                                document_id: "doc-1",
+                                filename: "one.docx",
+                                confirm_token: "token-1",
+                            },
+                            {
+                                document_id: "doc-2",
+                                filename: "two.docx",
+                                confirm_token: "token-2",
+                            },
+                        ],
+                    },
+                }),
+            ),
+        ).toEqual([
+            { documentId: "doc-1", filename: "one.docx", confirmToken: "token-1" },
+            { documentId: "doc-2", filename: "two.docx", confirmToken: "token-2" },
+        ]);
     });
 
     it("treats a missing ai_draft flag as false, matching a pending-edits-only 409", () => {

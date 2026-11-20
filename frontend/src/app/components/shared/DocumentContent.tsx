@@ -151,10 +151,24 @@ export function DocumentContent({
     } = useResolvedPanelDocument(document);
 
     const documentId = resolvedDocument.document_id;
-    const versionId = resolvedDocument.version_id ?? null;
+    const versionId =
+        resolvedDocument.version_id ??
+        (mode.kind === "edit" ? mode.edit.version_id : null) ??
+        null;
     const draftKey = `${documentId}:${versionId ?? ""}`;
+    const [serverAiDraft, setServerAiDraft] = useState(false);
+    // Gate B4 N17/N27: banner from the version's AI status, open edits, or
+    // /display's X-Mike-Ai-Draft. KI drafts themselves render as a stamped
+    // PDF; pending-edit docx stays on DocxView so the highlight still works.
     const showAiDraft =
-        resolvedDocument.ai_draft === true &&
+        (resolvedDocument.ai_draft === true ||
+            resolvedDocument.unresolved_ai === true ||
+            serverAiDraft ||
+            mode.kind === "edit") &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
+    const useStampedPdfViewer =
+        (resolvedDocument.ai_draft === true || serverAiDraft) &&
         approvedDraftKey !== draftKey &&
         !!versionId;
     const isCase = resolvedDocument.type === "case";
@@ -253,10 +267,14 @@ export function DocumentContent({
                         compactActions={compactActions ?? narrow}
                         saveState={saveState}
                         onVersionChange={onVersionChange}
-                        onDownload={() => localDownload.current?.()}
+                        onDownload={
+                            showAiDraft
+                                ? undefined
+                                : () => localDownload.current?.()
+                        }
                         toolbarVisible={toolbarVisible}
                         onToggleToolbar={
-                            viewType === "docx" && canEdit
+                            viewType === "docx" && canEdit && !useStampedPdfViewer
                                 ? () => setToolbarVisible((visible) => !visible)
                                 : undefined
                         }
@@ -333,6 +351,18 @@ export function DocumentContent({
                         onRetry={retryDocument}
                         onClearQuote={() => setActiveCitationQuoteId(null)}
                     />
+                ) : useStampedPdfViewer || viewType === "pdf" ? (
+                    <PdfView
+                        refetchKey={refetchKey}
+                        doc={{
+                            document_id: documentId,
+                            version_id: versionId,
+                        }}
+                        rounded={false}
+                        quotes={active ? activeViewerQuotes : undefined}
+                        quoteFocusKey={quoteFocusKey}
+                        onAiDraftStatus={setServerAiDraft}
+                    />
                 ) : viewType === "docx" ? (
                     <DocxView
                         onDownloadReady={handleDownloadReady}
@@ -378,6 +408,7 @@ export function DocumentContent({
                         rounded={false}
                         quotes={active ? activeViewerQuotes : undefined}
                         quoteFocusKey={quoteFocusKey}
+                        onAiDraftStatus={setServerAiDraft}
                     />
                 )}
             </DocumentAnnotationLayer>

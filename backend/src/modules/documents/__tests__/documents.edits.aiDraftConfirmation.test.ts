@@ -122,4 +122,28 @@ describe("aiDraftConfirmationState (Gate B4 audit finding N15)", () => {
 
     expect(await aiDraftConfirmationState("doc-1", fakeDb(), "missing")).toBeNull();
   });
+
+  it("refuses when the pending-edits query fails instead of treating that as none (N28)", async () => {
+    mockVersions({ active: { id: "version-active", ai_draft: false } });
+    const db = {
+      from: (table: string) => {
+        const query: Record<string, unknown> = {};
+        query.select = () => query;
+        query.eq = () => query;
+        query.order = () => query;
+        query.then = (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) =>
+          table === "document_edits"
+            ? Promise.resolve({
+                data: null,
+                error: new Error("document_edits unavailable"),
+              }).then(resolve, reject)
+            : Promise.resolve({ data: [], error: null }).then(resolve, reject);
+        return query;
+      },
+    } as never;
+
+    await expect(aiDraftConfirmationState("doc-1", db)).rejects.toThrow(
+      "document_edits unavailable",
+    );
+  });
 });

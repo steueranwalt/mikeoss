@@ -21,6 +21,8 @@ interface Props {
     doc: { document_id: string; version_id?: string | null } | null;
     displayUrl?: string | null;
     refetchKey?: number | string;
+    /** Gate B4 audit finding N27: /display's X-Mike-Ai-Draft / no-store. */
+    onAiDraftStatus?: (isAiDraft: boolean) => void;
     /** Preferred: one or more (page, quote) pairs to highlight. */
     quotes?: CitationQuote[];
     /** Changes when the parent wants the current quote re-focused. */
@@ -207,6 +209,7 @@ export function PdfView({
     quote,
     fallbackPage,
     rounded = true,
+    onAiDraftStatus,
 }: Props) {
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -248,12 +251,15 @@ export function PdfView({
         message: string;
     } | null>(null);
 
-    const { result, loading, error } = useFetchSingleDoc(
+    const { result, loading, error, isAiDraft } = useFetchSingleDoc(
         doc?.document_id ?? null,
         doc?.version_id ?? null,
         displayUrl,
         refetchKey,
     );
+    useEffect(() => {
+        onAiDraftStatus?.(isAiDraft);
+    }, [isAiDraft, onAiDraftStatus]);
     const documentError =
         error ?? (pdfLoadError?.result === result ? pdfLoadError?.message : null);
 

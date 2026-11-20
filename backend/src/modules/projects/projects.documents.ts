@@ -242,7 +242,7 @@ export async function assignOrCopyDocument(
     const { data: srcV } = await db
       .from("document_versions")
       .select(
-        "storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count",
+        "storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, ai_draft",
       )
       .eq("id", doc.current_version_id)
       .single();
@@ -306,6 +306,10 @@ export async function assignOrCopyDocument(
           textless_page_count:
             (srcV.textless_page_count as number | null) ?? null,
           content_sha256: contentSha256(srcBytes),
+        }, {
+          // Gate B4 audit finding N25: a copy into a project is still the
+          // same unreviewed AI draft if the source version was one.
+          aiDraft: srcV.ai_draft === true,
         });
       const copyVersionRowId = (newV?.id as string | null) ?? null;
       if (newVError || !copyVersionRowId) {

@@ -66,15 +66,15 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
   it("never requires confirmation for a draft — it just marks isAiDraft", async () => {
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
-      storage_path: "documents/user-1/doc-1/source.xlsx",
+      storage_path: "documents/user-1/doc-1/source.pdf",
       pdf_storage_path: null,
       version_number: 1,
-      filename: "financials.xlsx",
+      filename: "brief.pdf",
       source: "generated",
-      file_type: "xlsx", // not converted to PDF, so no LibreOffice dependency here
+      file_type: "pdf",
       ai_draft: true,
     });
-    mocks.downloadFile.mockResolvedValue(Buffer.from("fake xlsx bytes"));
+    mocks.downloadFile.mockResolvedValue(await makePdfBytes());
 
     const result = await getDisplayableVersion("doc-1", "user-1", "u@example.com", null, database());
 
@@ -108,7 +108,7 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
     }
   });
 
-  it("falls back to the unstamped PDF (best-effort, not fail-closed) when stamping fails", async () => {
+  it("refuses the display when stamping fails rather than serving the unstamped original (N17)", async () => {
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
       storage_path: "documents/user-1/doc-1/source.pdf",
@@ -123,11 +123,9 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
 
     const result = await getDisplayableVersion("doc-1", "user-1", "u@example.com", null, database());
 
-    // The preview still works — a stamping failure never breaks /display.
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.isAiDraft).toBe(true);
-      expect(result.display.bytes.toString()).toBe("not a real pdf");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe("stamping_failed");
     }
   });
 
@@ -154,7 +152,7 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
     }
   });
 
-  it("leaves a displayed spreadsheet (no stamping capability) unchanged but still marks isAiDraft", async () => {
+  it("refuses an xlsx draft when it cannot be converted to a stamped PDF (N17)", async () => {
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
       storage_path: "documents/user-1/doc-1/source.xlsx",
@@ -170,10 +168,9 @@ describe("getDisplayableVersion (Gate B4 audit finding N17)", () => {
 
     const result = await getDisplayableVersion("doc-1", "user-1", "u@example.com", null, database());
 
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.isAiDraft).toBe(true);
-      expect(result.display.bytes).toEqual(original);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe("stamping_failed");
     }
   });
 });

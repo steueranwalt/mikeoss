@@ -81,13 +81,10 @@ documentsRouter.delete("/:documentId", requireAuth, asyncRoute(async (req, res) 
 // Optional ?version_id= renders a historical version. Defaults to the
 // document's current_version_id.
 //
-// Gate B4 audit finding N17 (decision per Nils, best practice): a display,
-// not an export — no confirmation required, the same as /file's
-// ?purpose=display (Gate B4 audit finding N20). A PDF rendition of an
-// unapproved AI draft/unresolved-edit version carries the banner (best-
-// effort — a stamping failure falls back to the unstamped PDF rather than
-// breaking the preview) and is answered with Cache-Control: no-store, so a
-// cache never serves this particular response once the draft state changes.
+// Gate B4 audit finding N17 (Nils, 20.11.2026, 22:40 MEZ, binding): a
+// display, not an export — no confirmation. An unapproved AI draft is a
+// stamped PDF (or refused). Cache-Control: no-store and X-Mike-Ai-Draft
+// tell the viewer not to cache and to show the banner.
 documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string;
@@ -104,10 +101,23 @@ documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, 
         db,
     );
     if (!result.ok) {
-        if (result.kind === "error")
-            return void sendInternalError(res, result.error);
-        return void res.status(404).json({ detail: result.detail });
+        switch (result.kind) {
+            case "error":
+                return void sendInternalError(res, result.error);
+            case "stamping_failed":
+                return void res.status(409).json({
+                    code: "stamping_failed",
+                    detail: result.detail,
+                });
+            case "not_found":
+                return void res.status(404).json({ detail: result.detail });
+            default: {
+                const exhaustive: never = result;
+                return void sendInternalError(res, exhaustive);
+            }
+        }
     }
+    res.setHeader("X-Mike-Ai-Draft", result.isAiDraft ? "1" : "0");
     if (result.isAiDraft) res.setHeader("Cache-Control", "no-store");
     sendDocumentDisplay(res, result.display);
 }));
@@ -132,12 +142,9 @@ documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, 
 // served unstamped (fail-closed). Without anything to confirm, the download
 // is unchanged.
 //
-// Gate B4 audit finding N20 (regression): ?purpose=display is the in-app
-// docx/spreadsheet viewer (useFetchDocxBytes) reading raw bytes to render
-// inline, not a download — it never confirms and is never stamped, the
-// same way /display (the PDF-preview route) isn't an export either. The
-// "AI draft, not approved" warning there is a frontend banner over the
-// already-rendered document, not a check this route makes.
+// Gate B4 audit finding N23: ?purpose=display is not an exemption for AI
+// drafts. Viewers of drafts load /display. /file always runs the same
+// confirmation check, whether or not purpose=display was sent.
 documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
@@ -226,9 +233,10 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
 documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
-    const { document_ids, folder_ids } = req.body as {
+    const { document_ids, folder_ids, confirm_tokens } = req.body as {
         document_ids?: string[];
         folder_ids?: string[];
+        confirm_tokens?: Record<string, string>;
     };
     const documentIds = Array.isArray(document_ids)
         ? [...new Set(document_ids.filter((id) => typeof id === "string"))]
@@ -243,8 +251,16 @@ documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) =
             .json({ detail: "document_ids or folder_ids is required" });
 
     const db = createServerSupabase();
+    const confirmTokens =
+        confirm_tokens && typeof confirm_tokens === "object" && !Array.isArray(confirm_tokens)
+            ? Object.fromEntries(
+                  Object.entries(confirm_tokens).filter(
+                      (entry): entry is [string, string] => typeof entry[1] === "string",
+                  ),
+              )
+            : undefined;
     const result = await resolveZipExportDocuments(
-        { documentIds, folderIds, userId, userEmail },
+        { documentIds, folderIds, userId, userEmail, confirmTokens },
         db,
     );
     if (!result.ok) {
@@ -255,9 +271,14 @@ documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) =
                 code: "unresolved_ai_edits",
                 detail:
                     "One or more selected documents have AI-proposed changes or an unapproved " +
-                    "AI draft that has not been confirmed yet. Remove them from the selection or " +
-                    "confirm each one individually before retrying.",
+                    "AI draft that has not been confirmed yet. Confirm the export to include " +
+                    "them, marked as AI drafts.",
                 documents: result.documents,
+            });
+        if (result.kind === "stamping_failed")
+            return void res.status(409).json({
+                code: "stamping_failed",
+                detail: result.detail,
             });
         const status = result.kind === "limit" ? 413 : 404;
         return void res.status(status).json({ detail: result.detail });
@@ -271,12 +292,15 @@ documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) =
     const JSZip = (await import("jszip")).default;
     const zip = new JSZip();
     const usedNames = new Set<string>();
-    const fileStreams = result.entries.map((entry) => {
+    const fileStreams = result.entries.flatMap((entry) => {
+        const name = uniqueArchiveFilename(entry.filename, usedNames);
+        if (entry.bytes) {
+            zip.file(name, entry.bytes, { compression: "STORE" });
+            return [];
+        }
         const stream = createFileReadStream(entry.storagePath);
-        zip.file(uniqueArchiveFilename(entry.filename, usedNames), stream, {
-            compression: "STORE",
-        });
-        return stream;
+        zip.file(name, stream, { compression: "STORE" });
+        return [stream];
     });
 
     res.setHeader("Content-Type", "application/zip");

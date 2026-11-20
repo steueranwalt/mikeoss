@@ -21,8 +21,8 @@ export function useDocumentViewers() {
         if (guard) guards.current.set(id, guard);
         else guards.current.delete(id);
     }, []);
-    const download = useCallback((id: string, documentId: string, versionId?: string | null, filename?: string) => {
-        const live = downloads.current.get(id);
+    const download = useCallback((id: string, documentId: string, versionId?: string | null, filename?: string, aiDraft?: boolean) => {
+        const live = aiDraft ? undefined : downloads.current.get(id);
         return live
             ? live()
             : confirmExport((confirmToken) =>

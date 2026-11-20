@@ -52,6 +52,40 @@ it("retries the export with the 409 confirm_token after the user confirms", asyn
     expect(await result).toBe("ok");
 });
 
+it("retries a zip export with per-document confirm_tokens after the user confirms (N26)", async () => {
+    const hook = setup();
+    const action = vi
+        .fn()
+        .mockRejectedValueOnce(
+            new MikeApiError({
+                message: "This selection has AI-proposed changes.",
+                status: 409,
+                code: "unresolved_ai_edits",
+                details: {
+                    documents: [
+                        {
+                            document_id: "doc-1",
+                            filename: "one.docx",
+                            confirm_token: "token-1",
+                        },
+                    ],
+                },
+            }),
+        )
+        .mockResolvedValueOnce("ok");
+    let result!: Promise<string>;
+    act(() => {
+        result = hook().confirmZipExport(action);
+    });
+    expect(await screen.findByRole("dialog")).toHaveTextContent("one.docx");
+    await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Export anyway" }));
+        await result;
+    });
+    expect(action).toHaveBeenLastCalledWith({ "doc-1": "token-1" });
+    expect(await result).toBe("ok");
+});
+
 it("does not retry when the user cancels", async () => {
     const hook = setup();
     const action = vi.fn().mockRejectedValue(refusal());

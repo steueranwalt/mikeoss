@@ -1609,7 +1609,7 @@ export default function ProjectAssistantChatPage() {
                         addDocToChat(document)
                     }
                     addToChatDisabled={!canSendChat}
-                    onDownloadDoc={(document) => documentViewers.download(document.id, document.id, tabs.find((tab) => tab.documentId === document.id)?.versionId, document.filename)}
+                    onDownloadDoc={(document) => documentViewers.download(document.id, document.id, tabs.find((tab) => tab.documentId === document.id)?.versionId, document.filename, document.ai_draft === true || document.unresolved_ai === true)}
                     downloading={explorerDownload.downloading}
                     onRenameDoc={handleRenameDoc}
                     onDeleteDoc={requestDeleteDoc}

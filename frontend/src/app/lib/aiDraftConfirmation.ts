@@ -11,6 +11,13 @@ export type UnresolvedAiEditsDetails = {
     aiDraft: boolean;
 };
 
+/** Gate B4 audit finding N26: a zip 409 names every document that needs a token. */
+export type UnresolvedAiEditsZipDocument = {
+    documentId: string;
+    filename: string;
+    confirmToken: string;
+};
+
 function asString(value: unknown): string | null {
     return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -49,4 +56,35 @@ export function unresolvedAiEditsFromError(
         pendingEditIds,
         aiDraft: details.ai_draft === true,
     };
+}
+
+/** Pull the zip-batch confirmation payload out of a 409, or null. */
+export function unresolvedAiEditsZipFromError(
+    error: unknown,
+): UnresolvedAiEditsZipDocument[] | null {
+    if (!error || typeof error !== "object") return null;
+    const candidate = error as {
+        status?: unknown;
+        code?: unknown;
+        details?: unknown;
+    };
+    if (candidate.status !== 409 || candidate.code !== "unresolved_ai_edits") {
+        return null;
+    }
+    const details =
+        candidate.details && typeof candidate.details === "object"
+            ? (candidate.details as Record<string, unknown>)
+            : null;
+    if (!details || !Array.isArray(details.documents)) return null;
+    const documents: UnresolvedAiEditsZipDocument[] = [];
+    for (const row of details.documents) {
+        if (!row || typeof row !== "object") return null;
+        const entry = row as Record<string, unknown>;
+        const documentId = asString(entry.document_id);
+        const filename = asString(entry.filename) ?? documentId;
+        const confirmToken = asString(entry.confirm_token);
+        if (!documentId || !confirmToken) return null;
+        documents.push({ documentId, filename: filename ?? documentId, confirmToken });
+    }
+    return documents.length > 0 ? documents : null;
 }

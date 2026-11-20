@@ -4,6 +4,7 @@ import { DbJobDeferredError } from "../../../lib/dbq/types";
 const storage = vi.hoisted(() => ({
   deleteFile: vi.fn(),
   assertStorageConfigured: vi.fn(),
+  listFiles: vi.fn(),
 }));
 vi.mock("../../../lib/storage", () => ({
   ...storage,
@@ -28,6 +29,7 @@ beforeEach(() => {
   // that makes storage fail cannot leak into the next one.
   storage.deleteFile.mockReset().mockResolvedValue(undefined);
   storage.assertStorageConfigured.mockReset();
+  storage.listFiles.mockReset().mockResolvedValue([]);
 });
 afterEach(() => vi.unstubAllEnvs());
 const job = (keys: unknown[]) => ({ payload: { keys } });
@@ -175,6 +177,17 @@ describe("document cleanup job", () => {
     ).toEqual([]);
     await completeInlineDocumentCleanup(fake.db, []);
     expect(storage.deleteFile).not.toHaveBeenCalled();
+    fake.done();
+  });
+
+  it("captures stamped AI-draft copies on bulk document delete even when workers are enabled (N22-rest)", async () => {
+    vi.stubEnv("DB_JOBS_ENABLED", "true");
+    storage.listFiles.mockResolvedValue(["exports/ai-draft-stamped/doc/a.pdf"]);
+    const fake = scriptedDb([]);
+    expect(
+      await captureInlineDocumentCleanup(fake.db, { documentIds: ["doc"] }),
+    ).toEqual(["exports/ai-draft-stamped/doc/a.pdf"]);
+    expect(storage.listFiles).toHaveBeenCalledWith("exports/ai-draft-stamped/doc/");
     fake.done();
   });
 

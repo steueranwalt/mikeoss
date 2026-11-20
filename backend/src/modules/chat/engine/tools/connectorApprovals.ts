@@ -93,6 +93,15 @@ async function executeApprovedDocumentOverwrite(
       event: { ...baseEvent, status: "error", error: "Invalid approval payload." },
     };
   }
+  // Gate B4 audit finding N18-rest: an empty version_id is not "skip the
+  // stale check" — refuse the same way a legacy document_edit binding is.
+  if (!item.binding.version_id) {
+    const error = "This approval is from an older version of Mike and can no longer be applied. Ask the model to propose the overwrite again.";
+    return {
+      content: JSON.stringify({ ok: false, error }),
+      event: { ...baseEvent, status: "error", error },
+    };
+  }
   const result = await writeProjectDocument(
     {
       filename: args.filename,

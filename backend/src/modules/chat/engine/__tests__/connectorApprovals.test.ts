@@ -638,6 +638,45 @@ describe("write_project_document overwrite approval (Gate B4 audit finding N11)"
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ approval_id: "approve-overwrite", status: "error" });
   });
+
+  it("refuses an overwrite whose binding.version_id is empty rather than skipping the stale check (N18-rest)", async () => {
+    const emptyVersionItem: ConnectorApprovalItem = {
+      ...overwriteItem,
+      binding: {
+        type: "document_overwrite",
+        document_id: "doc-existing",
+        version_id: "",
+      },
+    };
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [emptyVersionItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-overwrite", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.writeProjectDocument).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      approval_id: "approve-overwrite",
+      status: "error",
+    });
+  });
 });
 
 describe("approval context replay", () => {

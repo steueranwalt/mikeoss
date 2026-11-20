@@ -379,15 +379,16 @@ describe("GET /single-documents/:documentId/file", () => {
       expect(mocks.createFileReadStream).toHaveBeenCalledWith(CLEAN_ACTIVE.storage_path);
     });
 
-    // Gate B4 audit finding N20: the viewer (?purpose=display) never
-    // confirms, even against the unapproved-draft old version above.
-    it("?purpose=display serves the unapproved draft version unconfirmed, for the in-app viewer", async () => {
+    // Gate B4 audit finding N23: /file no longer exempts purpose=display
+    // for AI drafts. The in-app viewer loads /display instead.
+    it("?purpose=display still refuses an unapproved draft (N23)", async () => {
       const response = await request(app)
         .get(`/single-documents/document-1/file?version_id=${OLD_DRAFT.id}&purpose=display`)
         .set("Authorization", "Bearer test");
 
-      expect(response.status).toBe(200);
-      expect(mocks.createFileReadStream).toHaveBeenCalledWith(OLD_DRAFT.storage_path);
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("unresolved_ai_edits");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
     });
 
     it("does not let a pending edit against the active version block a clean old version's download", async () => {

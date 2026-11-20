@@ -23,7 +23,7 @@ import {
     type AiDraftConfirmationState,
 } from "./documents.edits";
 import { stampAiDraftBytes, isStampableAiDraftFileType } from "../../lib/aiDraftWatermark";
-import { stampPdfAiDraftWatermark } from "../../lib/pdfAiDraftWatermark";
+import { stampAiDraftDisplayBytes } from "../../lib/aiDraftDisplayStamp";
 import { enqueueDbJob } from "../../lib/dbq/enqueue";
 import { reportError } from "../../lib/observability/sentry";
 
@@ -40,18 +40,12 @@ import { reportError } from "../../lib/observability/sentry";
  * A conversion failure throws out of `loadDocumentDisplay`, so it is reported
  * separately from the 404 paths: the route maps it to an internal error.
  *
- * Gate B4 audit finding N17 (decision per Nils, best practice): /display is a
- * display, not an export — it never asks for confirmation, the same as /file
- * with ?purpose=display (Gate B4 audit finding N20). Unlike the raw-bytes
- * viewer, though, a PDF rendition here is something this route itself
- * generates (or substitutes a stored one for), so it both can and does carry
- * the banner when the version is an unapproved AI draft/has unresolved
- * edits — best-effort, not fail-closed: a stamping failure falls back to the
- * unstamped PDF rather than breaking the preview, since nothing was
- * confirmed or exported here. `isAiDraft` tells the route to answer with
- * Cache-Control: no-store, so a shared or browser cache never serves this
- * particular banner-carrying (or band-failed) response to a later request
- * after the draft was approved, or vice versa.
+ * Gate B4 audit finding N17 (Nils, 20.11.2026, 22:40 MEZ, binding): /display
+ * is a display, not an export — it never asks for confirmation. An unapproved
+ * AI draft / unresolved-edit version is shown as a stamped PDF (xlsx, csv,
+ * html, images are converted first) or refused. Stamping is fail-closed: a
+ * failure does not fall back to the unstamped original. `isAiDraft` tells
+ * the route to answer with Cache-Control: no-store and X-Mike-Ai-Draft.
  */
 export async function getDisplayableVersion(
     documentId: string,
@@ -62,6 +56,7 @@ export async function getDisplayableVersion(
 ): Promise<
     | { ok: true; display: DocumentDisplayPayload; isAiDraft: boolean }
     | { ok: false; kind: "not_found"; detail: string }
+    | { ok: false; kind: "stamping_failed"; detail: string }
     | { ok: false; kind: "error"; error: unknown }
 > {
     const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
@@ -93,14 +88,25 @@ export async function getDisplayableVersion(
             };
 
         const draftState = await aiDraftConfirmationState(documentId, db, active.id);
-        if (draftState && display.contentType === "application/pdf") {
+        if (draftState) {
             try {
-                display.bytes = await stampPdfAiDraftWatermark(display.bytes);
+                const stamped = await stampAiDraftDisplayBytes(
+                    display.bytes,
+                    active.file_type,
+                    display.contentType,
+                );
+                display.bytes = stamped;
+                display.contentType = "application/pdf";
+                display.filename = display.filename.toLowerCase().endsWith(".pdf")
+                    ? display.filename
+                    : `${display.filename.replace(/\.[^.]+$/, "") || display.filename}.pdf`;
             } catch (error) {
-                // Best-effort: a stamping failure falls back to the unstamped
-                // PDF rather than breaking the preview — unlike an export,
-                // nothing here was confirmed or left the server unmodified.
                 reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_display_stamp" } });
+                return {
+                    ok: false,
+                    kind: "stamping_failed",
+                    detail: "This document could not be stamped as an AI draft and will not be shown unstamped.",
+                };
             }
         }
         return { ok: true, display, isAiDraft: draftState !== null };
@@ -151,6 +157,7 @@ type DownloadDocumentRow = {
     workflow_id?: string | null;
     storage_path?: string | null;
     filename?: string | null;
+    file_type?: string | null;
     source?: string | null;
     active_version_number?: number | null;
 };
@@ -160,6 +167,8 @@ export type ZipExportEntry = {
     storagePath: string;
     filename: string;
     size: number;
+    /** Stamped AI-draft bytes, when confirmation was supplied for this entry. */
+    bytes?: Buffer;
 };
 
 /**
@@ -184,25 +193,26 @@ export async function resolveZipExportDocuments(
         folderIds: string[];
         userId: string;
         userEmail: string | undefined;
+        /** Per-document confirm_token from a previous 409, keyed by document id. */
+        confirmTokens?: Record<string, string>;
     },
     db: Db,
 ): Promise<
     | { ok: true; entries: ZipExportEntry[] }
     | { ok: false; kind: "limit"; detail: string }
     | { ok: false; kind: "not_found"; detail: string }
-    // Gate B4 audit finding N4: at least one requested document has
-    // unresolved tracked changes or an unapproved AI draft. Unlike the
-    // single-document routes, a batch has no single confirm_token to retry
-    // with — the caller drops these documents from the request or confirms
-    // each individually (e.g. via /url) before retrying the whole batch.
-    // Fail-closed: the rest of the batch is refused too, rather than silently
-    // shipping a zip with gaps.
+    // Gate B4 audit finding N4/N26: at least one requested document has
+    // unresolved tracked changes or an unapproved AI draft. A subsequent
+    // request may retry with per-document confirm_tokens from this body's
+    // `documents` list. Fail-closed: the rest of the batch is refused too,
+    // rather than silently shipping a zip with gaps.
     | { ok: false; kind: "confirmation_required"; documents: ZipExportConfirmationNeeded[] }
+    | { ok: false; kind: "stamping_failed"; detail: string }
     // Database and object-storage failures are opaque to the client: the
     // route hands the raw error to sendInternalError.
     | { ok: false; kind: "internal"; error: unknown }
 > {
-    const { documentIds, folderIds, userId, userEmail } = params;
+    const { documentIds, folderIds, userId, userEmail, confirmTokens } = params;
 
     // Bound the *requested* count before any query runs, so an oversized
     // selection cannot cost a database round-trip.
@@ -378,9 +388,16 @@ export async function resolveZipExportDocuments(
         5,
         async (doc) => ({ doc, state: await aiDraftConfirmationState(doc.id, db) }),
     );
+    const confirmedById = new Map<string, AiDraftConfirmationState>();
     const needsConfirmation = confirmationStates.filter(
-        (entry): entry is { doc: (typeof activeDocs)[number]; state: AiDraftConfirmationState } =>
-            entry.state !== null,
+        (entry): entry is { doc: (typeof activeDocs)[number]; state: AiDraftConfirmationState } => {
+            if (!entry.state) return false;
+            if (confirmTokens?.[entry.doc.id] === entry.state.confirmToken) {
+                confirmedById.set(entry.doc.id, entry.state);
+                return false;
+            }
+            return true;
+        },
     );
     if (needsConfirmation.length > 0) {
         return {
@@ -426,18 +443,47 @@ export async function resolveZipExportDocuments(
     );
     if (sizeLimit) return { ok: false, kind: "limit", detail: sizeLimit };
 
-    return {
-        ok: true,
-        entries: sized.map(({ doc, size }) => ({
+    const entries: ZipExportEntry[] = [];
+    for (const { doc, size } of sized) {
+        let filename = downloadFilenameForVersion(
+            doc.filename,
+            doc.active_version_number ?? null,
+            doc.source === "assistant_edit",
+        );
+        const confirmed = confirmedById.get(doc.id);
+        if (!confirmed) {
+            entries.push({ storagePath: doc.storage_path, filename, size });
+            continue;
+        }
+        if (isStampableAiDraftFileType(doc.file_type)) {
+            try {
+                const original = await downloadFile(doc.storage_path);
+                if (!original) throw new Error("source bytes unavailable");
+                const stamped = await stampAiDraftBytes(doc.file_type, Buffer.from(original));
+                entries.push({
+                    storagePath: doc.storage_path,
+                    filename,
+                    size: stamped.byteLength,
+                    bytes: stamped,
+                });
+            } catch (error) {
+                reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_zip_stamp" } });
+                return {
+                    ok: false,
+                    kind: "stamping_failed",
+                    detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+                };
+            }
+            continue;
+        }
+        entries.push({
             storagePath: doc.storage_path,
-            filename: downloadFilenameForVersion(
-                doc.filename,
-                doc.active_version_number ?? null,
-                doc.source === "assistant_edit",
-            ),
+            filename: withAiDraftFilenamePrefix(filename),
             size,
-        })),
-    };
+        });
+    }
+
+    return { ok: true, entries };
 }
 
 // ---------------------------------------------------------------------------
@@ -592,16 +638,12 @@ export async function getFileStreamSource(
     /** Gate B4 audit finding N5: the caller's confirm_token, if it sent one. */
     confirmToken?: string,
     /**
-     * Gate B4 audit finding N20: "export" (default) is the pre-existing
-     * confirm-and-stamp behavior for an actual download. "display" is the
-     * in-app docx/spreadsheet viewer reading raw bytes to render inline —
-     * it must keep working unconfirmed and unmodified (a stamped copy would
-     * both lie about the stored content and break the tracked-changes
-     * editing flow that reads the same bytes), with the "AI draft, not
-     * approved" warning left to a frontend banner informed by the
-     * document's own ai_draft/pending-edit metadata instead.
+         * Gate B4 audit finding N23: "export" (default) is a download.
+     * "display" used to skip confirmation so the in-app viewer could read
+     * raw draft bytes. Viewers of AI drafts now load /display instead;
+     * /file no longer makes an exception for purpose=display.
      */
-    purpose: "display" | "export" = "export",
+    _purpose: "display" | "export" = "export",
 ): Promise<
     | {
           ok: true;
@@ -633,11 +675,9 @@ export async function getFileStreamSource(
             active.source === "assistant_edit",
         ),
         confirmation:
-            purpose === "display"
-                ? { ok: true }
-                : // Gate B4 audit finding N15: checked against `active.id` —
-                  // the version actually streamed below, not always the
-                  // current version.
-                  await checkAiDraftConfirmation(documentId, confirmToken, db, active.id),
+            // Gate B4 audit finding N23: purpose=display is not an exemption
+            // for AI drafts. Gate B4 audit finding N15: checked against
+            // `active.id` — the version actually streamed below.
+            await checkAiDraftConfirmation(documentId, confirmToken, db, active.id),
     };
 }
