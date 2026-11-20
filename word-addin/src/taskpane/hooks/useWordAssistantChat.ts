@@ -23,7 +23,10 @@ import {
   setLocalWordChatActiveTurn,
 } from "../lib/localWordChats";
 import { saveWordMessageOrNotify } from "../lib/localWordChatSaves";
-import type { WordChatStorageMode } from "../lib/wordChatSettings";
+import type {
+  WordChatStorageMode,
+  WordEditApplyMode,
+} from "../lib/wordChatSettings";
 import { notifyWordChatHistoryChanged } from "../lib/wordChatHistoryEvents";
 import type {
   WordAssistantChatController,
@@ -146,7 +149,7 @@ function parseToolEdit(raw: unknown): RedlineEdit | null {
 function toolEditRow(
   messageId: string,
   item: WordToolEditItem,
-  applyMode: "direct" | "approval",
+  applyMode: WordEditApplyMode,
 ): WordDocumentEdit {
   return {
     // Matches the id device-only storage assigns, so a local reload resolves
@@ -173,7 +176,7 @@ interface UseWordAssistantChatOptions {
   wordDocumentId: string;
   wordChatStorage: WordChatStorageMode;
   wordChatOwnerId: string;
-  editApplyMode: "direct" | "approval";
+  editApplyMode: WordEditApplyMode;
   editController: WordEditStreamController;
 }
 

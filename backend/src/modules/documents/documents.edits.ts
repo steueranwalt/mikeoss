@@ -28,18 +28,21 @@ export type AiDraftConfirmationState = {
 };
 
 /**
- * Gate B4 audit findings L3/N7: whether `documentId`'s active version is
- * something a human has not actually approved yet — either it carries an
+ * Gate B4 audit findings L3/N7: whether the version actually being handed
+ * out — `versionId` if given, else the document's active version — is
+ * something a human has not actually approved yet: either it carries an
  * AI-proposed tracked change that has not been accepted or rejected
- * (document_edits.status='pending'), OR the active version itself is still
- * an AI draft (document_versions.ai_draft, Gate B4 audit finding L4) that
- * nobody has called approve-draft on. Either condition alone is enough:
- * a document with no pending tracked changes can still be a fresh
- * write_project_document/generate_docx draft nobody has reviewed, and a
- * document with a reviewed, non-draft active version can still carry
- * unrelated pending changes from a different edit. Returns null when
- * neither condition applies (nothing to confirm) or the document has no
- * active version at all.
+ * (document_edits.status='pending', scoped to this exact version_id — Gate
+ * B4 audit finding N15: a historical version a caller explicitly requested
+ * never contains edits proposed against a *later* version, so those do not
+ * apply to it), OR the version itself is still an AI draft
+ * (document_versions.ai_draft, Gate B4 audit finding L4) that nobody has
+ * called approve-draft on. Either condition alone is enough: a version with
+ * no pending tracked changes can still be a fresh write_project_document/
+ * generate_docx draft nobody has reviewed, and a reviewed, non-draft
+ * version can still carry its own unrelated pending changes. Returns null
+ * when neither condition applies (nothing to confirm) or the version does
+ * not exist / does not belong to this document.
  *
  * Gate B4 audit finding N5: a caller does not merely assert
  * `confirm_ai_draft=1` — it must present confirmToken, computed from the
@@ -58,26 +61,31 @@ export type AiDraftConfirmationState = {
 export async function aiDraftConfirmationState(
     documentId: string,
     db: Db,
+    /**
+     * Gate B4 audit finding N15: the version actually being delivered.
+     * Omit to mean "the document's current active version" — but a caller
+     * that already resolved a specific version (a ?version_id query param,
+     * or a download token minted against one particular storage_path) must
+     * pass that exact id, not rely on the default, or this function silently
+     * checks a different version than the one it hands out.
+     */
+    versionId?: string | null,
 ): Promise<AiDraftConfirmationState | null> {
-    const [pendingEditsResult, activeVersion] = await Promise.all([
-        db
-            .from("document_edits")
-            .select("id")
-            .eq("document_id", documentId)
-            .eq("status", "pending")
-            .order("id", { ascending: true }),
-        loadActiveVersion(documentId, db),
-    ]);
-    if (!activeVersion) return null;
-    const pendingEditIds = ((pendingEditsResult.data ?? []) as { id: string }[]).map(
-        (row) => row.id,
-    );
-    const aiDraft = activeVersion.ai_draft === true;
+    const targetVersion = await loadActiveVersion(documentId, db, versionId);
+    if (!targetVersion) return null;
+    const { data: pendingEdits } = await db
+        .from("document_edits")
+        .select("id")
+        .eq("version_id", targetVersion.id)
+        .eq("status", "pending")
+        .order("id", { ascending: true });
+    const pendingEditIds = ((pendingEdits ?? []) as { id: string }[]).map((row) => row.id);
+    const aiDraft = targetVersion.ai_draft === true;
     if (pendingEditIds.length === 0 && !aiDraft) return null;
     const confirmToken = createHash("sha256")
-        .update(JSON.stringify({ version_id: activeVersion.id, pendingEditIds, aiDraft }))
+        .update(JSON.stringify({ version_id: targetVersion.id, pendingEditIds, aiDraft }))
         .digest("hex");
-    return { confirmToken, versionId: activeVersion.id, pendingEditIds, aiDraft };
+    return { confirmToken, versionId: targetVersion.id, pendingEditIds, aiDraft };
 }
 
 /**
@@ -94,11 +102,13 @@ export async function checkAiDraftConfirmation(
     documentId: string,
     providedToken: string | undefined,
     db: Db,
+    /** Gate B4 audit finding N15: see aiDraftConfirmationState. */
+    versionId?: string | null,
 ): Promise<
     | { ok: true; state?: AiDraftConfirmationState }
     | { ok: false; state: AiDraftConfirmationState }
 > {
-    const state = await aiDraftConfirmationState(documentId, db);
+    const state = await aiDraftConfirmationState(documentId, db, versionId);
     if (!state) return { ok: true };
     if (providedToken && providedToken === state.confirmToken) return { ok: true, state };
     return { ok: false, state };
@@ -117,11 +127,13 @@ export async function requireAiDraftConfirmationOrRespond409(
     documentId: string,
     confirmToken: string | undefined,
     db: Db,
+    /** Gate B4 audit finding N15: see aiDraftConfirmationState. */
+    versionId?: string | null,
 ): Promise<
     | { proceed: true; state?: AiDraftConfirmationState }
     | { proceed: false; body: ReturnType<typeof aiDraftConfirmationResponseBody> }
 > {
-    const result = await checkAiDraftConfirmation(documentId, confirmToken, db);
+    const result = await checkAiDraftConfirmation(documentId, confirmToken, db, versionId);
     if (result.ok) return { proceed: true, state: result.state };
     return { proceed: false, body: aiDraftConfirmationResponseBody(result.state) };
 }

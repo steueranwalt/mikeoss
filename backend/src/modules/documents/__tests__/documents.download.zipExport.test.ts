@@ -23,21 +23,22 @@ vi.mock("../../../lib/documentVersions", async (importOriginal) => ({
 
 import { resolveZipExportDocuments } from "../documents.service";
 
-// Gate B4 audit finding N4: how many pending document_edits rows
-// aiDraftConfirmationState sees per call. Keyed off document_id so a test
-// can give different documents different pending-edit counts.
-let pendingEditsCountByDoc: Record<string, number> = {};
+// Gate B4 audit finding N4/N15: how many pending document_edits rows
+// aiDraftConfirmationState sees per call. Keyed off version_id (the query
+// is scoped to the exact version being checked, not the whole document) so
+// a test can give different versions different pending-edit counts.
+let pendingEditsCountByVersion: Record<string, number> = {};
 
 function makeDatabase() {
   return {
     from: vi.fn((table: string) => {
       const query: Record<string, unknown> = {};
-      let eqDocumentId: string | undefined;
+      let eqVersionId: string | undefined;
       for (const method of ["select", "in", "is"]) {
         query[method] = vi.fn(() => query);
       }
       query.eq = vi.fn((column: string, value: string) => {
-        if (column === "document_id") eqDocumentId = value;
+        if (column === "version_id") eqVersionId = value;
         return query;
       });
       query.order = vi.fn(() => query);
@@ -101,9 +102,9 @@ function makeDatabase() {
           }).then(resolve);
       } else if (table === "document_edits") {
         query.then = (resolve: (value: unknown) => unknown) => {
-          const count = eqDocumentId ? (pendingEditsCountByDoc[eqDocumentId] ?? 0) : 0;
+          const count = eqVersionId ? (pendingEditsCountByVersion[eqVersionId] ?? 0) : 0;
           const rows = Array.from({ length: count }, (_, i) => ({
-            id: `${eqDocumentId}-edit-${i + 1}`,
+            id: `${eqVersionId}-edit-${i + 1}`,
           }));
           return Promise.resolve({ data: rows, error: null }).then(resolve);
         };
@@ -116,7 +117,7 @@ function makeDatabase() {
 describe("resolveZipExportDocuments (Gate B4 audit finding N4)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    pendingEditsCountByDoc = {};
+    pendingEditsCountByVersion = {};
     mocks.ensureDocAccess.mockResolvedValue({ ok: true, isCreator: true });
     mocks.headFile.mockResolvedValue({ size: 3, etag: '"etag"', contentType: "application/octet-stream" });
     mocks.loadActiveVersion.mockImplementation(async (documentId: string) => {
@@ -164,7 +165,7 @@ describe("resolveZipExportDocuments (Gate B4 audit finding N4)", () => {
   });
 
   it("refuses the whole batch when one document has pending tracked-change edits", async () => {
-    pendingEditsCountByDoc["doc-2"] = 1;
+    pendingEditsCountByVersion["version-2"] = 1;
 
     const result = await resolveZipExportDocuments(
       { documentIds: ["doc-1", "doc-2"], folderIds: [], userId: "user-1", userEmail: "u@example.com" },

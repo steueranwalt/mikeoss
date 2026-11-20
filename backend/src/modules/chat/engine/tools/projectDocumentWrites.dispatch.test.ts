@@ -24,6 +24,30 @@ function emptyProject() {
   );
 }
 
+// A project with one existing write_project_document-authored document, so
+// a second write to the same filename hits the N11/N18 approval path.
+function projectWithExistingDocument() {
+  return makeFakeDb((call: DbCall) => {
+    if (call.table === "documents" && call.op === "select") {
+      return { data: [{ id: "doc-existing", current_version_id: "version-existing" }] };
+    }
+    if (call.table === "document_versions" && call.op === "select") {
+      return {
+        data: [
+          {
+            id: "version-existing",
+            document_id: "doc-existing",
+            filename: "cites.json",
+            source: "tool_write",
+            version_number: 1,
+          },
+        ],
+      };
+    }
+    return { data: [] };
+  });
+}
+
 function call(filename: string, content: string) {
   return {
     id: "write-1",
@@ -59,6 +83,36 @@ async function dispatch(
     String((result.toolResults[0] as { content: string }).content),
   );
   return { payload, events, docStore, docIndex, result, calls };
+}
+
+// Gate B4 audit finding N18: runs write_project_document against a database
+// seeded with an existing same-named document, with connectorApprovals on,
+// so the overwrite takes the approval path instead of refusing outright.
+async function dispatchOverwrite(toolCall: ReturnType<typeof call>) {
+  const { db } = projectWithExistingDocument();
+  const docStore: DocStore = new Map();
+  const docIndex: DocIndex = {};
+  const result = await runToolCalls(
+    [toolCall],
+    docStore,
+    "user-1",
+    db as never,
+    () => {},
+    undefined,
+    undefined,
+    docIndex,
+    undefined,
+    undefined,
+    "project-1",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { connectorApprovals: true },
+  );
+  return result;
 }
 
 beforeEach(() => {
@@ -102,5 +156,22 @@ describe("write_project_document dispatch", () => {
     expect(events).toEqual([]);
     expect(docIndex).toEqual({});
     expect(uploadFileMock).not.toHaveBeenCalled();
+  });
+
+  // Gate B4 audit finding N18: the approval binding pins the active version
+  // the overwrite request saw, the same stale-review guard edit_document's
+  // binding uses (Gate B4 audit finding N13).
+  it("pins the active version_id in the overwrite approval binding", async () => {
+    const result = await dispatchOverwrite(call("cites.json", '{"cites": [1]}'));
+
+    expect(result.askInputsEvents).toHaveLength(1);
+    const item = result.askInputsEvents[0].items[0] as {
+      binding?: { type: string; document_id: string; version_id: string };
+    };
+    expect(item.binding).toMatchObject({
+      type: "document_overwrite",
+      document_id: "doc-existing",
+      version_id: "version-existing",
+    });
   });
 });

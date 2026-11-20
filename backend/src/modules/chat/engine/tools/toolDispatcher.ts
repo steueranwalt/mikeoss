@@ -2252,7 +2252,13 @@ export async function runToolCalls(
                 document_id: d.id,
                 storage_path: newKeys[idx],
                 pdf_storage_path: newPdfKeys[idx],
-                source: "upload",
+                // Gate B4 audit finding N14: 'upload' is also the source
+                // migration 0123's "publish file" RPC gives a genuine human
+                // upload (and several migrations' default for an
+                // unspecified source) — sharing it here made every one of
+                // those indistinguishable from a model-replicated copy.
+                // 'replicated' is unique to this tool.
+                source: "replicated",
                 version_number: 1,
                 filename: d.filename,
                 file_type: active?.file_type ?? sourceInfo.file_type,
@@ -2477,6 +2483,10 @@ export async function runToolCalls(
           binding: {
             type: "document_overwrite",
             document_id: result.pending_overwrite?.document_id ?? "",
+            // Gate B4 audit finding N18: pins the active version this
+            // moment saw — the approved replay is refused if the document
+            // moved on by then, instead of overwriting whatever is current.
+            version_id: result.pending_overwrite?.version_id ?? "",
           },
         });
         toolResults.push({

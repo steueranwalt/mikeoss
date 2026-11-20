@@ -6,6 +6,7 @@ import { downloadFile, getSignedUrl, headFile, uploadFile } from "../../lib/stor
 import {
     attachActiveVersionPaths,
     loadActiveVersion,
+    withAiDraftFilenamePrefix,
 } from "../../lib/documentVersions";
 import { checkProjectAccess, ensureDocAccess } from "../../lib/access";
 import { mapWithConcurrency } from "../../lib/concurrency";
@@ -21,7 +22,9 @@ import {
     checkAiDraftConfirmation,
     type AiDraftConfirmationState,
 } from "./documents.edits";
-import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
+import { stampAiDraftBytes, isStampableAiDraftFileType } from "../../lib/aiDraftWatermark";
+import { stampPdfAiDraftWatermark } from "../../lib/pdfAiDraftWatermark";
+import { enqueueDbJob } from "../../lib/dbq/enqueue";
 import { reportError } from "../../lib/observability/sentry";
 
 // ---------------------------------------------------------------------------
@@ -36,6 +39,19 @@ import { reportError } from "../../lib/observability/sentry";
  *
  * A conversion failure throws out of `loadDocumentDisplay`, so it is reported
  * separately from the 404 paths: the route maps it to an internal error.
+ *
+ * Gate B4 audit finding N17 (decision per Nils, best practice): /display is a
+ * display, not an export — it never asks for confirmation, the same as /file
+ * with ?purpose=display (Gate B4 audit finding N20). Unlike the raw-bytes
+ * viewer, though, a PDF rendition here is something this route itself
+ * generates (or substitutes a stored one for), so it both can and does carry
+ * the banner when the version is an unapproved AI draft/has unresolved
+ * edits — best-effort, not fail-closed: a stamping failure falls back to the
+ * unstamped PDF rather than breaking the preview, since nothing was
+ * confirmed or exported here. `isAiDraft` tells the route to answer with
+ * Cache-Control: no-store, so a shared or browser cache never serves this
+ * particular banner-carrying (or band-failed) response to a later request
+ * after the draft was approved, or vice versa.
  */
 export async function getDisplayableVersion(
     documentId: string,
@@ -44,7 +60,7 @@ export async function getDisplayableVersion(
     versionIdParam: string | null,
     db: Db,
 ): Promise<
-    | { ok: true; display: DocumentDisplayPayload }
+    | { ok: true; display: DocumentDisplayPayload; isAiDraft: boolean }
     | { ok: false; kind: "not_found"; detail: string }
     | { ok: false; kind: "error"; error: unknown }
 > {
@@ -75,7 +91,19 @@ export async function getDisplayableVersion(
                 kind: "not_found",
                 detail: "Document not found in storage",
             };
-        return { ok: true, display };
+
+        const draftState = await aiDraftConfirmationState(documentId, db, active.id);
+        if (draftState && display.contentType === "application/pdf") {
+            try {
+                display.bytes = await stampPdfAiDraftWatermark(display.bytes);
+            } catch (error) {
+                // Best-effort: a stamping failure falls back to the unstamped
+                // PDF rather than breaking the preview — unlike an export,
+                // nothing here was confirmed or left the server unmodified.
+                reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_display_stamp" } });
+            }
+        }
+        return { ok: true, display, isAiDraft: draftState !== null };
     } catch (error) {
         return { ok: false, kind: "error", error };
     }
@@ -422,6 +450,27 @@ export async function resolveZipExportDocuments(
 // it without one.
 const STAMPED_COPY_TTL_SECONDS = 600;
 
+// Gate B4 audit finding N22: comfortably past STAMPED_COPY_TTL_SECONDS — the
+// signed URL itself stops working well before this runs, so there is no
+// client left to race.
+const STAMPED_COPY_CLEANUP_DELAY_SECONDS = 3600;
+
+async function enqueueStampedCopyCleanup(db: Db, storagePath: string): Promise<void> {
+    try {
+        await enqueueDbJob(db, {
+            kind: "storage.cleanup",
+            payload: { keys: [storagePath] },
+            maxAttempts: 100,
+            runAt: new Date(Date.now() + STAMPED_COPY_CLEANUP_DELAY_SECONDS * 1000).toISOString(),
+        });
+    } catch (error) {
+        // Best-effort: deleteDocumentAndVersionFiles's whole-prefix sweep on
+        // document deletion, and the throwaway copy's own short signed-URL
+        // TTL, are both still in effect even if scheduling this job fails.
+        reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp_cleanup" } });
+    }
+}
+
 export async function getDownloadUrl(
     documentId: string,
     userId: string,
@@ -445,7 +494,7 @@ export async function getDownloadUrl(
     if (!active)
         return { ok: false, kind: "not_found", detail: "No file available" };
 
-    const downloadFilename = downloadFilenameForVersion(
+    let downloadFilename = downloadFilenameForVersion(
         active.filename,
         active.version_number,
         active.source === "assistant_edit",
@@ -453,28 +502,42 @@ export async function getDownloadUrl(
 
     // One read decides both: whether confirmation is required at all, and
     // (if the caller is confirmed) whether there is anything left to stamp.
-    const draftState = await aiDraftConfirmationState(documentId, db);
+    // Gate B4 audit finding N15: checked against `active.id` — the version
+    // this response actually hands out, which is `versionIdParam` when the
+    // caller asked for one, not always the document's current version.
+    const draftState = await aiDraftConfirmationState(documentId, db, active.id);
     if (draftState && confirmToken !== draftState.confirmToken) {
         return { ok: false, kind: "confirmation_required", state: draftState };
     }
 
     let signedStoragePath = active.storage_path;
-    if (draftState && active.file_type === "docx") {
-        // Gate B4 audit finding N6: fail-closed, not fail-open — a docx that
-        // needed confirmation and cannot be stamped is refused outright
-        // (stamping_failed) rather than silently handed out as the
-        // original, unstamped object. A docx that did not need confirmation
+    if (draftState && isStampableAiDraftFileType(active.file_type)) {
+        // Gate B4 audit finding N6/N16: fail-closed, not fail-open — a docx
+        // or pdf that needed confirmation and cannot be stamped is refused
+        // outright (stamping_failed) rather than silently handed out as the
+        // original, unstamped object. A file that did not need confirmation
         // (draftState null: no pending edits, not an AI draft) is untouched.
         try {
             const original = await downloadFile(active.storage_path);
             if (!original) throw new Error("source bytes unavailable");
-            const stamped = await stampAiDraftWatermark(Buffer.from(original));
-            signedStoragePath = `exports/ai-draft-stamped/${documentId}/${randomUUID()}.docx`;
+            const stamped = await stampAiDraftBytes(active.file_type, Buffer.from(original));
+            const extension = active.file_type === "pdf" ? "pdf" : "docx";
+            signedStoragePath = `exports/ai-draft-stamped/${documentId}/${randomUUID()}.${extension}`;
             await uploadFile(
                 signedStoragePath,
                 stamped.buffer.slice(stamped.byteOffset, stamped.byteOffset + stamped.byteLength) as ArrayBuffer,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                active.file_type === "pdf"
+                    ? "application/pdf"
+                    : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             );
+            // Gate B4 audit finding N22: the signed URL only works for
+            // STAMPED_COPY_TTL_SECONDS anyway — this throwaway copy has no
+            // other owner and no other reason to exist past that, so its
+            // cleanup is scheduled right here rather than left to accumulate
+            // until the document itself is deleted (deleteDocumentAndVersionFiles
+            // also sweeps this document's whole exports/ai-draft-stamped/
+            // prefix, for the copy a client never actually fetched in time).
+            await enqueueStampedCopyCleanup(db, signedStoragePath);
         } catch (error) {
             reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp" } });
             return {
@@ -483,6 +546,11 @@ export async function getDownloadUrl(
                 detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
             };
         }
+    } else if (draftState) {
+        // Gate B4 audit finding N16: no stamping capability for this format
+        // (xlsx, pptx, csv, ...) — the filename is the only place left to
+        // carry the warning.
+        downloadFilename = withAiDraftFilenamePrefix(downloadFilename);
     }
 
     const ttl = signedStoragePath === active.storage_path ? 3600 : STAMPED_COPY_TTL_SECONDS;
@@ -523,6 +591,17 @@ export async function getFileStreamSource(
     db: Db,
     /** Gate B4 audit finding N5: the caller's confirm_token, if it sent one. */
     confirmToken?: string,
+    /**
+     * Gate B4 audit finding N20: "export" (default) is the pre-existing
+     * confirm-and-stamp behavior for an actual download. "display" is the
+     * in-app docx/spreadsheet viewer reading raw bytes to render inline —
+     * it must keep working unconfirmed and unmodified (a stamped copy would
+     * both lie about the stored content and break the tracked-changes
+     * editing flow that reads the same bytes), with the "AI draft, not
+     * approved" warning left to a frontend banner informed by the
+     * document's own ai_draft/pending-edit metadata instead.
+     */
+    purpose: "display" | "export" = "export",
 ): Promise<
     | {
           ok: true;
@@ -553,6 +632,12 @@ export async function getFileStreamSource(
             active.version_number,
             active.source === "assistant_edit",
         ),
-        confirmation: await checkAiDraftConfirmation(documentId, confirmToken, db),
+        confirmation:
+            purpose === "display"
+                ? { ok: true }
+                : // Gate B4 audit finding N15: checked against `active.id` —
+                  // the version actually streamed below, not always the
+                  // current version.
+                  await checkAiDraftConfirmation(documentId, confirmToken, db, active.id),
     };
 }

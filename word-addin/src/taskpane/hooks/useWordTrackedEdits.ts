@@ -825,21 +825,6 @@ export function useWordTrackedEdits({
     ],
   );
 
-  const scheduleDirectEdit = useCallback(
-    (
-      messageId: string,
-      editIndex: number,
-      edit: RedlineEdit,
-      persistent: boolean,
-    ): void => {
-      const key = getEditKey(messageId, editIndex);
-      if (scheduledEditKeysRef.current.has(key)) return;
-      scheduledEditKeysRef.current.add(key);
-      beginApplyingEdit(key, edit, persistent, false, "direct");
-    },
-    [beginApplyingEdit],
-  );
-
   const scheduleReviewEdit = useCallback(
     (
       messageId: string,
@@ -952,16 +937,13 @@ export function useWordTrackedEdits({
       items: WordToolEditItem[],
       persistent: boolean,
     ): Promise<WordToolEditOutcome[]> => {
-      const mode = applyModeRef.current;
       const keys = items.map(({ blockIndex }) =>
         getEditKey(messageId, blockIndex),
       );
+      // Gate B4 audit finding N13: applyModeRef.current is always
+      // "approval" now — there is no "direct" branch left to take.
       items.forEach(({ blockIndex, edit }) => {
-        if (mode === "direct") {
-          scheduleDirectEdit(messageId, blockIndex, edit, persistent);
-        } else {
-          scheduleReviewEdit(messageId, blockIndex, edit, persistent);
-        }
+        scheduleReviewEdit(messageId, blockIndex, edit, persistent);
       });
       // Every scheduler registers its job synchronously, so the batch's jobs
       // are all present by the time this reads them.
@@ -1046,7 +1028,7 @@ export function useWordTrackedEdits({
         }
       });
     },
-    [scheduleDirectEdit, scheduleReviewEdit],
+    [scheduleReviewEdit],
   );
 
   const waitForMessageEdits = useCallback(
@@ -1078,24 +1060,12 @@ export function useWordTrackedEdits({
         if (!edit.sealed) return;
         const sealedEdit = toRedlineEdit(edit);
         if (!sealedEdit) return;
-        if (applyModeRef.current === "direct") {
-          scheduleDirectEdit(
-            messageId,
-            edit.blockIndex,
-            sealedEdit,
-            persistent,
-          );
-        } else {
-          scheduleReviewEdit(
-            messageId,
-            edit.blockIndex,
-            sealedEdit,
-            persistent,
-          );
-        }
+        // Gate B4 audit finding N13: applyModeRef.current is always
+        // "approval" now — there is no "direct" branch left to take.
+        scheduleReviewEdit(messageId, edit.blockIndex, sealedEdit, persistent);
       });
     },
-    [commitEditState, scheduleDirectEdit, scheduleReviewEdit],
+    [commitEditState, scheduleReviewEdit],
   );
 
   const markIncompleteRedlines = useCallback(

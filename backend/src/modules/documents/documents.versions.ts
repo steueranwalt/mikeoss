@@ -277,6 +277,15 @@ export async function createVersionFromDocument(
             textless_page_count: active.textless_page_count,
             content_sha256: contentSha256(bytes),
         },
+        {
+            // Gate B4 audit finding N21: "adopt as version" (write the
+            // source document's active bytes as a new version of the
+            // target) carries the source version's ai_draft forward, the
+            // same way a tracked-change edit inherits it — the bytes being
+            // adopted are still a model-authored draft nobody has approved
+            // just because they landed under a new document/version.
+            aiDraft: active.ai_draft === true,
+        },
     );
     if (verErr || !versionRow) {
         return {

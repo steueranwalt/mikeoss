@@ -48,6 +48,9 @@ const SOURCE_DESCRIPTIONS: Record<string, string> = {
   generated: "a document produced by generate_docx / generate_excel / generate_ppt",
   external_retrieval: "an external source saved into this project",
   skill_import: "a file belonging to an imported skill package",
+  // Gate B4 audit finding N14: replicate_document's own source, distinct
+  // from 'upload' (a genuine human upload).
+  replicated: "a document copied with replicate_document",
 };
 
 export type WriteProjectDocumentRefusal = {
@@ -58,17 +61,29 @@ export type WriteProjectDocumentRefusal = {
     | "unsupported_file_type"
     | "content_too_large"
     | "filename_conflict"
-    | "approval_required";
+    | "approval_required"
+    /**
+     * Gate B4 audit finding N18: an approved overwrite replay's
+     * expectedVersionId no longer matches the document's active version —
+     * someone else changed it between the approval request and the
+     * approved replay running.
+     */
+    | "approval_stale";
   detail: string;
   /** Present when another tool is the right way to produce this file. */
   use_instead?: string;
   /**
-   * Gate B4 audit finding N11: present only on an "approval_required"
+   * Gate B4 audit finding N11/N18: present only on an "approval_required"
    * refusal — the caller already-validated write to replay once the user
    * approves it (connectorApprovals.ts's executeApprovedDocumentOverwrite).
+   * `version_id` pins the active version this moment saw, the same stale-
+   * review guard edit_document's binding uses (Gate B4 audit finding N13) —
+   * the approved replay passes it back as `expectedVersionId` and is
+   * refused if the document moved on in the meantime.
    */
   pending_overwrite?: {
     document_id: string;
+    version_id: string;
     client_doc_id?: string;
   };
 };
@@ -211,6 +226,15 @@ export async function writeProjectDocument(
      * tool_write document) never needs this: only overwriting one does.
      */
     approved?: boolean;
+    /**
+     * Gate B4 audit finding N18: the active version_id the approval request
+     * captured in pending_overwrite — only meaningful alongside
+     * `approved: true`. Omitted, an approved replay trusts whatever is
+     * current; provided, a document that moved on since the user approved
+     * it is refused (`approval_stale`) instead of silently overwriting
+     * whatever version happens to be active now.
+     */
+    expectedVersionId?: string;
   },
   db: Db = createServerSupabase(),
 ): Promise<WriteProjectDocumentResult> {
@@ -269,7 +293,24 @@ export async function writeProjectDocument(
       ok: false,
       error: "approval_required",
       detail: `'${filename}' already exists in this project. Overwriting it needs the user's approval.`,
-      pending_overwrite: { document_id: existing.documentId },
+      pending_overwrite: { document_id: existing.documentId, version_id: existing.versionId },
+    };
+  }
+
+  // Gate B4 audit finding N18: an approved replay is refused outright if the
+  // document moved on since the approval was requested — the approval
+  // reviewed a specific version's overwrite, not "whatever is current now".
+  if (
+    existing &&
+    input.approved &&
+    input.expectedVersionId &&
+    existing.versionId !== input.expectedVersionId
+  ) {
+    return {
+      ok: false,
+      error: "approval_stale",
+      detail: `'${filename}' changed after this overwrite was approved. Ask the user to approve it again.`,
+      pending_overwrite: { document_id: existing.documentId, version_id: existing.versionId },
     };
   }
 

@@ -32,7 +32,8 @@ import {
     requireAiDraftConfirmationOrRespond409,
     aiDraftConfirmationResponseBody,
 } from "../documents/documents.service";
-import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
+import { withAiDraftFilenamePrefix } from "../../lib/documentVersions";
+import { stampAiDraftBytes, isStampableAiDraftFileType } from "../../lib/aiDraftWatermark";
 
 function contentTypeFor(filename: string): string {
     return contentTypeForDocumentType(documentSuffix(filename));
@@ -101,8 +102,10 @@ export async function storeBlobUpload(args: {
  * links stored in chat history), so an AI-draft/unresolved-edit document is
  * re-checked on every redemption instead — the same `confirm_token` gate as
  * `/file` and `/url`, keyed off the live document state, not the token's mint
- * time. A confirmed .docx is stamped before it is served (fail-closed: a
- * stamping failure refuses the download rather than serving it unstamped).
+ * time. A confirmed .docx or .pdf is stamped before it is served (fail-closed:
+ * a stamping failure refuses the download rather than serving it unstamped).
+ * Any other confirmed format (Gate B4 audit finding N16) has no stamping
+ * capability, so it carries the warning in its filename instead.
  */
 export async function resolveTokenDownload(
     db: Db,
@@ -132,7 +135,8 @@ export async function resolveTokenDownload(
         .is("deleted_at", null)
         .maybeSingle();
     if (!version) return { ok: false, kind: "not_found" };
-    const { document_id: documentId, file_type: fileType } = version as {
+    const { id: tokenVersionId, document_id: documentId, file_type: fileType } = version as {
+        id: string;
         document_id: string;
         file_type: string | null;
     };
@@ -147,10 +151,16 @@ export async function resolveTokenDownload(
     const access = await ensureDocAccess(doc, args.userId, args.userEmail, db);
     if (!access.ok) return { ok: false, kind: "not_found" };
 
+    // Gate B4 audit finding N15: checked against the exact version this
+    // token's storage_path resolved to — this token may have been minted
+    // against an older version than the document's current one, and that
+    // older version's own draft/pending-edit state is what actually matters
+    // for the bytes this route is about to serve.
     const confirmation = await requireAiDraftConfirmationOrRespond409(
         documentId,
         args.confirmToken,
         db,
+        tokenVersionId,
     );
     if (!confirmation.proceed) {
         return { ok: false, kind: "confirmation_required", body: confirmation.body };
@@ -159,9 +169,9 @@ export async function resolveTokenDownload(
     const raw = await downloadFile(info.path);
     if (!raw) return { ok: false, kind: "not_found" };
 
-    if (confirmation.state && fileType === "docx") {
+    if (confirmation.state && isStampableAiDraftFileType(fileType)) {
         try {
-            const stamped = await stampAiDraftWatermark(Buffer.from(raw));
+            const stamped = await stampAiDraftBytes(fileType, Buffer.from(raw));
             return {
                 ok: true,
                 bytes: stamped,
@@ -177,10 +187,13 @@ export async function resolveTokenDownload(
         }
     }
 
+    // Gate B4 audit finding N16: a confirmed draft in a format with no
+    // stamping capability (xlsx, pptx, csv, ...) at least carries the
+    // warning in its filename.
     return {
         ok: true,
         bytes: Buffer.from(raw),
         contentType: contentTypeFor(info.filename),
-        filename: info.filename,
+        filename: confirmation.state ? withAiDraftFilenamePrefix(info.filename) : info.filename,
     };
 }

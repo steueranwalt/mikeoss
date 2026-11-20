@@ -100,6 +100,10 @@ async function executeApprovedDocumentOverwrite(
       userId,
       projectId: typeof args.project_id === "string" ? args.project_id : null,
       approved: true,
+      // Gate B4 audit finding N18: pins the active version the binding
+      // captured at request time — a document that moved on since is
+      // refused (approval_stale) rather than silently overwritten.
+      expectedVersionId: item.binding.version_id,
     },
     db,
   );

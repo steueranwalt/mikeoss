@@ -238,6 +238,30 @@ describe("version copy caller policy", () => {
     expect(fake.rpc.mock.calls[0][1].p_version.pdf_storage_path).toBeNull();
     expect(mocks.uploadFile).toHaveBeenCalledOnce();
   });
+  // Gate B4 audit finding N21: "adopt as version" carries the source
+  // version's ai_draft forward — the bytes are still an unreviewed
+  // model-authored draft even once they land under a new document/version.
+  it("inherits ai_draft from the source document's active version", async () => {
+    mocks.active.mockResolvedValue({
+      storage_path: "source/key",
+      pdf_storage_path: "source/pdf",
+      filename: "Clause.docx",
+      file_type: "docx",
+      page_count: 2,
+      ai_draft: true,
+    });
+    const fake = db();
+
+    expect(await createVersionFromDocument(args, fake.db)).toMatchObject({ ok: true });
+    expect(fake.rpc.mock.calls[0][1].p_version).toMatchObject({ ai_draft: true });
+  });
+
+  it("does not mark the new version a draft when the source version was not one", async () => {
+    const fake = db(); // mocks.active's default has no ai_draft -> falsy
+    expect(await createVersionFromDocument(args, fake.db)).toMatchObject({ ok: true });
+    expect(fake.rpc.mock.calls[0][1].p_version).toMatchObject({ ai_draft: false });
+  });
+
   it("queues conversion when the source has no rendition", async () => {
     mocks.active.mockResolvedValue({
       storage_path: "source/key",

@@ -116,15 +116,22 @@ function bannerParagraph(text: string): XNode {
  * Idempotent in practice but not guarded against double-stamping — callers
  * are expected to stamp a fresh copy of the stored bytes per export, never
  * the stored bytes themselves (see documents.download.ts).
+ *
+ * Gate B4 audit finding N16 (rest of N6): throws rather than returning the
+ * input bytes unchanged when the .docx cannot be parsed or has no body to
+ * stamp. Every caller treats a thrown error as fail-closed (refuse the
+ * download, Gate B4 audit finding N6) — silently handing back the original,
+ * unstamped bytes here would be the exact fail-open behavior that refusal
+ * exists to prevent.
  */
 export async function stampAiDraftWatermark(bytes: Buffer): Promise<Buffer> {
     const zip = await JSZip.loadAsync(bytes);
     const docXmlFile = getZipEntry(zip, "word/document.xml");
-    if (!docXmlFile) return bytes; // not a well-formed .docx; leave it alone
+    if (!docXmlFile) throw new Error("Not a well-formed .docx: word/document.xml is missing");
     const xml = await docXmlFile.async("string");
     const parsed = createParser().parse(xml) as XNode[];
     const body = findBody(parsed);
-    if (!body) return bytes;
+    if (!body) throw new Error("Not a well-formed .docx: word/document.xml has no <w:body>");
     body.unshift(bannerParagraph(AI_DRAFT_WATERMARK_TEXT));
     const rebuilt = createBuilder().build(parsed) as string;
     setZipEntry(zip, "word/document.xml", rebuilt);

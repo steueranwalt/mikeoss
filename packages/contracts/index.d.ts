@@ -60,6 +60,8 @@ export type SourceDocument = {
   subdocuments?: SourceSubdocument[];
   version_id?: string | null;
   version_number?: number | null;
+  /** Gate B4: the version being shown is an unreviewed AI draft. */
+  ai_draft?: boolean;
 };
 
 /**
@@ -183,6 +185,15 @@ export type ConnectorApprovalBinding =
        */
       type: "document_overwrite";
       document_id: string;
+      /**
+       * Gate B4 audit finding N18: the document's active version at request
+       * time, mirroring document_edit's version_id (N13) — a stale-review
+       * guard, not a hint. Required (not optional, unlike document_edit's):
+       * this binding type was introduced in the same change as this field,
+       * so there is no pre-existing approval item without it to stay
+       * compatible with.
+       */
+      version_id: string;
     };
 
 export type AskInputsEvent = {
@@ -589,7 +600,9 @@ export type AssistantEvent =
 
 export type AssistantErrorCode = "invalid_api_key";
 
-export type WordEditApplyMode = "direct" | "approval";
+// Gate B4 audit finding N13: narrowed from "direct" | "approval" — every
+// Word edit is reviewed before it reaches the document, never "direct".
+export type WordEditApplyMode = "approval";
 
 export interface WordDocumentEdit {
   id: string;
@@ -600,7 +613,7 @@ export interface WordDocumentEdit {
   formats: string[];
   occurrence?: "all";
   reason?: string;
-  applyMode: "direct" | "approval";
+  applyMode: "approval";
   applyStatus: "proposed" | "applied" | "unmanaged" | "failed";
   resolutionStatus?: WordEditResolutionStatus;
   matchedOccurrences?: number;

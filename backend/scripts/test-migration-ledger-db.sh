@@ -19,3 +19,9 @@ if [ "$ready" != true ]; then docker logs "$container"; exit 1; fi
 port="$(docker port "$container" 5432/tcp | sed 's/.*://')"
 export MIKE_MIGRATION_TEST_DATABASE_URL="postgresql://postgres:migration-test@127.0.0.1:$port/mike_migration_test_suite?sslmode=disable"
 pnpm exec vitest run src/__tests__/migrationLedger.db.test.ts --maxWorkers=1
+# Gate B4 audit finding N19: replay 0178–0180 (and 0181) against the same
+# disposable Postgres so CI actually runs the backfill's real-SQL tests
+# instead of skipping them the way a host without this env var would.
+export MIKE_TEST_POSTGRES_CONTAINER="$container"
+export POSTGRES_PASSWORD=migration-test
+pnpm exec vitest run src/modules/documents/__tests__/documentVersionAiDraftBackfill.postgres.test.ts --maxWorkers=1 --hookTimeout=120000 --testTimeout=120000

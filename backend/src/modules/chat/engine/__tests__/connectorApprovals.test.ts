@@ -524,7 +524,7 @@ describe("write_project_document overwrite approval (Gate B4 audit finding N11)"
       content: '{"cites": [1]}',
       project_id: "project-1",
     },
-    binding: { type: "document_overwrite", document_id: "doc-existing" },
+    binding: { type: "document_overwrite", document_id: "doc-existing", version_id: "version-existing" },
   };
 
   it("is not applied without approval: a rejected overwrite never reaches writeProjectDocument", async () => {
@@ -595,11 +595,48 @@ describe("write_project_document overwrite approval (Gate B4 audit finding N11)"
         userId: "user-1",
         projectId: "project-1",
         approved: true,
+        // Gate B4 audit finding N18: pins the version the binding captured
+        // at request time.
+        expectedVersionId: "version-existing",
       },
       db,
     );
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ approval_id: "approve-overwrite", status: "ok" });
+  });
+
+  // Gate B4 audit finding N18.
+  it("reports an approval_stale refusal instead of throwing, when the document moved on", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [overwriteItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-overwrite", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.writeProjectDocument.mockResolvedValue({
+      ok: false,
+      error: "approval_stale",
+      detail: "'cites.json' changed after this overwrite was approved. Ask the user to approve it again.",
+      pending_overwrite: { document_id: "doc-existing", version_id: "version-newer" },
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ approval_id: "approve-overwrite", status: "error" });
   });
 });
 

@@ -77,6 +77,7 @@ function input(overrides?: {
   content?: string;
   projectId?: string | null;
   approved?: boolean;
+  expectedVersionId?: string;
 }) {
   return {
     filename: overrides?.filename ?? "cites.json",
@@ -85,6 +86,9 @@ function input(overrides?: {
     projectId:
       overrides && "projectId" in overrides ? overrides.projectId : "project-1",
     ...(overrides?.approved !== undefined ? { approved: overrides.approved } : {}),
+    ...(overrides?.expectedVersionId !== undefined
+      ? { expectedVersionId: overrides.expectedVersionId }
+      : {}),
   };
 }
 
@@ -178,7 +182,7 @@ describe("writeProjectDocument", () => {
       ok: false,
       error: "approval_required",
       detail: expect.stringContaining("approval"),
-      pending_overwrite: { document_id: "doc-existing" },
+      pending_overwrite: { document_id: "doc-existing", version_id: "version-existing" },
     });
     expect(calls.filter((call) => call.op !== "select")).toEqual([]);
   });
@@ -212,6 +216,62 @@ describe("writeProjectDocument", () => {
       p_activate: true,
       p_version: { source: "tool_write" },
     });
+  });
+
+  // Gate B4 audit finding N18.
+  it("proceeds when the approved replay's expectedVersionId still matches the active version", async () => {
+    const { db } = database({
+      filename: "cites.json",
+      source: "tool_write",
+      versionId: "version-existing",
+      versionNumber: 2,
+    });
+
+    const result = await writeProjectDocument(
+      input({ content: '{"cites": [1]}', approved: true, expectedVersionId: "version-existing" }),
+      db as never,
+    );
+
+    expect(result).toMatchObject({ ok: true, created: "version" });
+  });
+
+  it("refuses an approved replay with approval_stale once the document moved on", async () => {
+    const { db, calls } = database({
+      filename: "cites.json",
+      source: "tool_write",
+      versionId: "version-existing",
+      versionNumber: 2,
+    });
+
+    const result = await writeProjectDocument(
+      input({ content: '{"cites": [1]}', approved: true, expectedVersionId: "version-that-no-longer-exists" }),
+      db as never,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "approval_stale",
+      detail: expect.stringContaining("approve it again"),
+      pending_overwrite: { document_id: "doc-existing", version_id: "version-existing" },
+    });
+    // Nothing is written: the same guarantee as an unapproved refusal.
+    expect(calls.filter((call) => call.op !== "select")).toEqual([]);
+  });
+
+  it("proceeds without checking staleness when the approved replay carries no expectedVersionId", async () => {
+    // Legacy-compatibility path (pre-N18 callers never set this field).
+    const { db } = database({
+      filename: "cites.json",
+      source: "tool_write",
+      versionNumber: 2,
+    });
+
+    const result = await writeProjectDocument(
+      input({ content: '{"cites": [1]}', approved: true }),
+      db as never,
+    );
+
+    expect(result).toMatchObject({ ok: true, created: "version" });
   });
 
   it("refuses a filename belonging to a document it did not write", async () => {

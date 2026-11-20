@@ -124,6 +124,16 @@ export async function loadActiveVersion(
  * Shared by the download routes and the "documents-zip" export job, which
  * must name the entries in the zip exactly as the sync route does.
  */
+/**
+ * Gate B4 audit finding N16: for a confirmed AI-draft/unresolved-edit
+ * download whose file type has no banner-stamping capability (anything but
+ * .docx/.pdf — xlsx, pptx, csv, ...), the filename is the only place left to
+ * carry the warning once the bytes leave this response.
+ */
+export function withAiDraftFilenamePrefix(filename: string): string {
+    return `[KI-ENTWURF] ${filename}`;
+}
+
 export function downloadFilenameForVersion(
     filename: string | null | undefined,
     versionNumber: number | null,

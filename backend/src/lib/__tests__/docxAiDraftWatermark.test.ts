@@ -45,11 +45,27 @@ describe("stampAiDraftWatermark", () => {
         await expect(stampAiDraftWatermark(notADocx)).rejects.toThrow();
     });
 
-    it("leaves a .docx with no word/document.xml untouched", async () => {
+    // Gate B4 audit finding N16 (rest of N6): a broken/unstampable .docx must
+    // refuse rather than silently hand back the unstamped original — every
+    // caller treats a thrown error as fail-closed (refuse the download).
+    it("throws instead of returning unstamped bytes for a .docx with no word/document.xml", async () => {
         const zip = new JSZip();
         zip.file("README.txt", "not a word document");
         const bytes = await zip.generateAsync({ type: "nodebuffer" });
-        const result = await stampAiDraftWatermark(bytes);
-        expect(result).toBe(bytes);
+        await expect(stampAiDraftWatermark(bytes)).rejects.toThrow(
+            /word\/document\.xml is missing/,
+        );
+    });
+
+    it("throws instead of returning unstamped bytes for a .docx whose document.xml has no <w:body>", async () => {
+        const zip = new JSZip();
+        zip.file(
+            "word/document.xml",
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${W_NS}></w:document>`,
+        );
+        const bytes = await zip.generateAsync({ type: "nodebuffer" });
+        await expect(stampAiDraftWatermark(bytes)).rejects.toThrow(
+            /no <w:body>/,
+        );
     });
 });

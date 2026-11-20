@@ -23,6 +23,7 @@ import {
   type AddinOperation,
 } from "../lib/errorReporting";
 import type { ReasoningLevel } from "../lib/wordChatTypes";
+import type { WordEditApplyMode } from "@mike/contracts";
 import {
   createControlRequestRetryPolicy,
   firstUploadResult,
@@ -507,7 +508,7 @@ export async function streamWordChat(payload: {
   document_id: string;
   document_name: string;
   storage: "cloud" | "local";
-  edit_apply_mode: "direct" | "approval";
+  edit_apply_mode: WordEditApplyMode;
   /** Declares that this pane executes client_tool_call frames. */
   client_tools?: boolean;
   signal?: AbortSignal;

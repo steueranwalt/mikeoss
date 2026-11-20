@@ -24,12 +24,13 @@ const BACKFILL_MIGRATION_SQL = readFileSync(
 // migration (including the ones that assume the runner's own
 // `pgmigrations` history table already exists, e.g. 0109) has really run.
 const container = process.env.MIKE_TEST_POSTGRES_CONTAINER;
+const password = process.env.POSTGRES_PASSWORD ?? "postgres";
 const database = `mike_test_ai_draft_backfill_${process.pid}_${Date.now()}`;
 const log = { info: () => {}, warn: () => {}, error: () => {} };
 
 const uid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
-describe.skipIf(!container)("document_versions.ai_draft backfill in PostgreSQL (Gate B4 audit finding N13)", () => {
+describe.skipIf(!container)("document_versions.ai_draft backfill in PostgreSQL (Gate B4 audit findings N13/N14)", () => {
   let created = false;
   let client: Client;
 
@@ -39,7 +40,7 @@ describe.skipIf(!container)("document_versions.ai_draft backfill in PostgreSQL (
     const portLine = execFileSync("docker", ["port", container!, "5432/tcp"], { encoding: "utf8" }).trim();
     const port = portLine.split(":").pop();
     client = new Client({
-      connectionString: `postgresql://postgres:postgres@127.0.0.1:${port}/${database}?sslmode=disable`,
+      connectionString: `postgresql://postgres:${encodeURIComponent(password)}@127.0.0.1:${port}/${database}?sslmode=disable`,
     });
     await client.connect();
     const failures = await runMigrationCommand(client, parseMigrationCommand(["up"]), "migrations", log);
@@ -90,6 +91,19 @@ describe.skipIf(!container)("document_versions.ai_draft backfill in PostgreSQL (
   // *before* that replay by seeding it and then re-running the backfill's
   // SQL directly (the same statement the ledger ran, see replayBackfill).
 
+  // Gate B4 audit finding N19: 0178 is the column add; the backfill tests
+  // below would fail if it were missing, but this names the column itself
+  // so a CI replay of 0178–0180 has an explicit 0178 assertion.
+  it("adds document_versions.ai_draft as a non-nullable boolean (migration 0178)", async () => {
+    const { rows } = await client.query(
+      `select data_type, is_nullable from information_schema.columns
+        where table_schema = 'public' and table_name = 'document_versions' and column_name = 'ai_draft'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].data_type).toBe("boolean");
+    expect(rows[0].is_nullable).toBe("NO");
+  });
+
   it("flags a generate_docx-sourced version left over from before the column existed", async () => {
     const documentId = uid(201);
     await seedChain(documentId, [{ id: uid(2011), versionNumber: 1, source: "generated" }]);
@@ -98,15 +112,27 @@ describe.skipIf(!container)("document_versions.ai_draft backfill in PostgreSQL (
     expect(await aiDraftValues(documentId)).toEqual([true]);
   });
 
-  it("flags a write_project_document- and replicate_document-sourced version the same way", async () => {
+  it("flags a write_project_document-sourced version the same way", async () => {
     const documentId = uid(202);
     await seedChain(documentId, [{ id: uid(2021), versionNumber: 1, source: "tool_write" }]);
-    const documentId2 = uid(203);
-    await seedChain(documentId2, [{ id: uid(2031), versionNumber: 1, source: "upload" }]);
     await replayBackfill();
 
     expect(await aiDraftValues(documentId)).toEqual([true]);
-    expect(await aiDraftValues(documentId2)).toEqual([true]);
+  });
+
+  // Gate B4 audit finding N14: before migration 0181 gave replicate_document
+  // its own 'replicated' source, it shared 'upload' with migration 0123's
+  // "publish file" RPC (a genuine human upload) and several migrations'
+  // default for an unspecified source. The backfill cannot tell a pre-0181
+  // replicated copy apart from a real upload by source alone, so it must
+  // leave every 'upload'-sourced row alone rather than risk marking real
+  // human uploads as unapproved AI drafts.
+  it("leaves a genuine human upload alone, even though replicate_document used to share its source value", async () => {
+    const documentId = uid(203);
+    await seedChain(documentId, [{ id: uid(2031), versionNumber: 1, source: "upload" }]);
+    await replayBackfill();
+
+    expect(await aiDraftValues(documentId)).toEqual([false]);
   });
 
   it("carries the draft flag through a tracked-change follow-up, and clears it once a human re-uploads", async () => {
@@ -157,6 +183,19 @@ describe.skipIf(!container)("document_versions.ai_draft backfill in PostgreSQL (
     const documentId = uid(207);
     await seedChain(documentId, [{ id: uid(2071), versionNumber: 1, source: "generated" }]);
     await client.query(`update public.document_versions set ai_draft = false where id = $1`, [uid(2071)]); // approve-draft, hypothetically before the backfill ran
+
+    await replayBackfill();
+
+    expect(await aiDraftValues(documentId)).toEqual([true]);
+  });
+
+  // Gate B4 audit finding N14: migration 0181 accepts the new source value
+  // before any code ships that inserts it; the backfill leaves it alone
+  // (ai_draft is set by the application at insert time, not here).
+  it("accepts the new 'replicated' source (migration 0181) and never touches its ai_draft itself", async () => {
+    const documentId = uid(208);
+    await seedChain(documentId, [{ id: uid(2081), versionNumber: 1, source: "replicated" }]);
+    await client.query(`update public.document_versions set ai_draft = true where id = $1`, [uid(2081)]); // set by application code, same as generate_docx/write_project_document
 
     await replayBackfill();
 

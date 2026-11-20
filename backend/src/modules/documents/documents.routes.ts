@@ -14,7 +14,8 @@ import { createServerSupabase } from "../../lib/supabase";
 import { sendInternalError } from "../../lib/httpError";
 import { reportError, setOperation } from "../../lib/observability/sentry";
 import { buildContentDisposition, createFileReadStream, downloadFile } from "../../lib/storage";
-import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
+import { stampAiDraftBytes, isStampableAiDraftFileType } from "../../lib/aiDraftWatermark";
+import { withAiDraftFilenamePrefix } from "../../lib/documentVersions";
 import { sendDocumentDisplay } from "../../lib/documentDisplay";
 import { contentTypeForDocumentType } from "../../lib/documentTypes";
 import { uniqueArchiveFilename } from "../../lib/zipExport";
@@ -79,6 +80,14 @@ documentsRouter.delete("/:documentId", requireAuth, asyncRoute(async (req, res) 
 // GET /single-documents/:documentId/display
 // Optional ?version_id= renders a historical version. Defaults to the
 // document's current_version_id.
+//
+// Gate B4 audit finding N17 (decision per Nils, best practice): a display,
+// not an export — no confirmation required, the same as /file's
+// ?purpose=display (Gate B4 audit finding N20). A PDF rendition of an
+// unapproved AI draft/unresolved-edit version carries the banner (best-
+// effort — a stamping failure falls back to the unstamped PDF rather than
+// breaking the preview) and is answered with Cache-Control: no-store, so a
+// cache never serves this particular response once the draft state changes.
 documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string;
@@ -99,6 +108,7 @@ documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, 
             return void sendInternalError(res, result.error);
         return void res.status(404).json({ detail: result.detail });
     }
+    if (result.isAiDraft) res.setHeader("Cache-Control", "no-store");
     sendDocumentDisplay(res, result.display);
 }));
 
@@ -111,16 +121,23 @@ documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, 
 // `res` is what applies backpressure to the object-storage read.
 //
 // Gate B4 audit findings L3/N4/N5/N6: a document with unresolved AI-proposed
-// tracked changes or an unapproved AI draft version refuses the download
-// with 409 unless the caller's ?confirm_token matches the document's
-// current pending-edits/draft state exactly (not a blanket
+// tracked changes or an unapproved AI draft version refuses an *export*
+// download with 409 unless the caller's ?confirm_token matches the
+// document's current pending-edits/draft state exactly (not a blanket
 // ?confirm_ai_draft=1 — a stale token from before the document changed is
-// rejected the same as no token at all). A confirmed .docx download is then
+// rejected the same as no token at all). A confirmed .docx export is then
 // served with a visible "AI draft, not approved" banner stamped in, so the
 // file itself carries the warning wherever it ends up — not just this
 // response. A docx that cannot be stamped is refused with 409 rather than
 // served unstamped (fail-closed). Without anything to confirm, the download
 // is unchanged.
+//
+// Gate B4 audit finding N20 (regression): ?purpose=display is the in-app
+// docx/spreadsheet viewer (useFetchDocxBytes) reading raw bytes to render
+// inline, not a download — it never confirms and is never stamped, the
+// same way /display (the PDF-preview route) isn't an export either. The
+// "AI draft, not approved" warning there is a frontend banner over the
+// already-rendered document, not a check this route makes.
 documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
@@ -129,6 +146,7 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
         typeof req.query.version_id === "string" ? req.query.version_id : null;
     const confirmToken =
         typeof req.query.confirm_token === "string" ? req.query.confirm_token : undefined;
+    const purpose = req.query.purpose === "display" ? "display" : "export";
     const db = createServerSupabase();
 
     const result = await getFileStreamSource(
@@ -138,6 +156,7 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
         versionIdParam,
         db,
         confirmToken,
+        purpose,
     );
     if (!result.ok)
         return void res.status(404).json({ detail: result.detail });
@@ -146,23 +165,22 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
         return void res.status(409).json(aiDraftConfirmationResponseBody(result.confirmation.state));
     }
 
-    if (result.confirmation.state && result.fileType === "docx") {
-        // Watermarking needs the whole file to parse and rewrite the zip, so
-        // this path cannot stream: it reads the object fully, stamps it, and
-        // sends the result. A confirmed non-docx keeps streaming below —
-        // there is no stamping capability for other formats. Headers for the
-        // file response are set only once stamping actually succeeds — set
-        // any earlier and a failed `res.json()` below would inherit this
-        // Content-Type instead of "application/json".
+    if (result.confirmation.state && isStampableAiDraftFileType(result.fileType)) {
+        // Watermarking needs the whole file to parse and rewrite it, so this
+        // path cannot stream: it reads the object fully, stamps it, and
+        // sends the result. Headers for the file response are set only once
+        // stamping actually succeeds — set any earlier and a failed
+        // `res.json()` below would inherit this Content-Type instead of
+        // "application/json".
         let stamped: Buffer;
         try {
             const bytes = await downloadFile(result.storagePath);
             if (!bytes) throw new Error("source bytes unavailable");
-            stamped = await stampAiDraftWatermark(Buffer.from(bytes));
+            stamped = await stampAiDraftBytes(result.fileType, Buffer.from(bytes));
         } catch (error) {
             reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp" } });
-            // Gate B4 audit finding N6: fail-closed — never fall through to
-            // the unstamped stream below.
+            // Gate B4 audit finding N6/N16: fail-closed — never fall through
+            // to the unstamped stream below.
             return void res.status(409).json({
                 code: "stamping_failed",
                 detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
@@ -177,10 +195,16 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
         return void res.send(stamped);
     }
 
+    // Gate B4 audit finding N16: a confirmed draft in a format with no
+    // stamping capability (xlsx, pptx, csv, ...) at least carries the
+    // warning in its filename, since nothing can be injected into the bytes.
+    const filename = result.confirmation.state
+        ? withAiDraftFilenamePrefix(result.filename)
+        : result.filename;
     res.setHeader("Content-Type", contentTypeForDocumentType(result.fileType));
     res.setHeader(
         "Content-Disposition",
-        buildContentDisposition("inline", result.filename),
+        buildContentDisposition("inline", filename),
     );
     res.setHeader("Content-Length", result.size);
     const source = createFileReadStream(result.storagePath);

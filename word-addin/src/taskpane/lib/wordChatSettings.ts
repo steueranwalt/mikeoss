@@ -10,17 +10,15 @@ export type { WordChatStorageMode };
 /**
  * How model-proposed edits reach the document.
  *
- * - `approval`: validate and preview each edit before the user applies it.
- * - `direct`: apply each streamed edit immediately as a pending tracked
- *   change. Applied edits remain available for acceptance or rejection.
- *
- * Gate B4: `direct` is retained only as a type — `useWordEditApplyMode`
- * below never returns it and ignores any attempt to set it. Every Word edit
- * is reviewed before it reaches the document, and this is not a user
- * setting. See EditApplyModeMenu.tsx, which no longer offers `direct` as a
- * choice.
+ * `approval`: validate and preview each edit before the user applies it —
+ * the only mode there ever is. `direct` (apply each streamed edit
+ * immediately as a pending tracked change, no preview) existed before Gate
+ * B4 and is gone from the type entirely (Gate B4 audit finding N13): every
+ * Word edit is reviewed before it reaches the document, never a user
+ * setting, so there is nothing left for a caller to narrow against. See
+ * EditApplyModeMenu.tsx, which no longer offers a choice at all.
  */
-export type WordEditApplyMode = "approval" | "direct";
+export type WordEditApplyMode = "approval";
 
 const STORAGE_KEY = "mike_word_chat_storage_mode";
 

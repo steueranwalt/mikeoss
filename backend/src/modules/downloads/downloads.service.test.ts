@@ -200,4 +200,50 @@ describe("resolveTokenDownload (Gate B4 audit finding N4)", () => {
       throw new Error(`expected stamping_failed, got ${JSON.stringify(result)}`);
     }
   });
+
+  // Gate B4 audit finding N15: this token was minted against the exact
+  // storage_path resolved to version-1 above — the confirmation check must
+  // look at version-1's own state, not whatever the document's current
+  // active version happens to be (a later version could have moved on).
+  it("checks the resolved version itself, not the document's current active version", async () => {
+    mocks.loadActiveVersion.mockImplementation(async (_documentId: string, _db: unknown, versionId?: string | null) =>
+      versionId === "version-1"
+        ? { id: "version-1", ai_draft: true } // the token's own version is still an unapproved draft
+        : { id: "version-2", ai_draft: false }, // a newer, clean version is meanwhile active
+    );
+
+    const result = await resolveTokenDownload(database as never, {
+      token,
+      userId: "user-1",
+      userEmail: "user@example.com",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.kind === "confirmation_required") {
+      expect(result.body.version_id).toBe("version-1");
+    } else {
+      throw new Error(`expected confirmation_required, got ${JSON.stringify(result)}`);
+    }
+    expect(mocks.loadActiveVersion).toHaveBeenCalledWith("document-1", database, "version-1");
+  });
+
+  it("serves an old, clean version's bytes unconfirmed even while the document's current active version is a draft", async () => {
+    mocks.loadActiveVersion.mockImplementation(async (_documentId: string, _db: unknown, versionId?: string | null) =>
+      versionId === "version-1"
+        ? { id: "version-1", ai_draft: false } // the token's own version was never a draft
+        : { id: "version-2", ai_draft: true }, // a newer version is meanwhile an unapproved draft
+    );
+
+    const result = await resolveTokenDownload(database as never, {
+      token,
+      userId: "user-1",
+      userEmail: "user@example.com",
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.bytes).toEqual(Buffer.from([1, 2, 3]));
+    }
+    expect(mocks.stampAiDraftWatermark).not.toHaveBeenCalled();
+  });
 });
