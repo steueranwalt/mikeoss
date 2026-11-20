@@ -9,7 +9,10 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { Client } = require("pg");
 const schema = require("./schema");
-const BASELINE_REF = "795f5cac7f53b6ccfb457eb4bdc018d065351d61";
+// Numbered-migration tree restored on this fork (not upstream's dated-name
+// SHA, which is not in this history). Later files (0176, 0178–0181) are the
+// upgrade under test.
+const BASELINE_REF = "6b776948c537f2bd8c15ac9b6d748245afb8f2fe";
 const REPO = path.resolve(__dirname, "../../..");
 const BACKEND = path.join(REPO, "backend");
 const PG_BIN = path.join(__dirname, "../../local-stack/bin/pg/bin");
