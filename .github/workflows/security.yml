@@ -1,0 +1,115 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Don't pile up runs on rapid pushes to the same PR: a new push cancels the
+# superseded run so it stops holding job slots (the org's concurrent-job cap is
+# shared by every workflow). Pushes to main each get their own group (keyed by
+# sha) and are never cancelled.
+concurrency:
+  group: security-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+# Least privilege for the job token: this workflow only reads the repo and
+# queries the npm registry — it never writes to the repo, issues, or checks.
+# Without this block the job token inherits the repository default, which
+# may be broader; OpenSSF Scorecard's Token-Permissions check verifies it.
+permissions:
+  contents: read
+
+jobs:
+  # The gate's own regression suite. It asserts the FAIL-CLOSED contract —
+  # every bug this script has had was a path where "we could not check"
+  # printed the same "passed" as "we checked and it is clean" — and it runs
+  # against stub servers, so it needs no network and no install. Kept as its
+  # own job rather than a step in the matrix below so it runs once, and so a
+  # broken gate is legible as a broken gate rather than as four failing
+  # workspace audits.
+  audit-gate-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      # pnpm/action-setup installs the pinned version directly. `corepack
+      # enable` alone does not: there is no root package.json for it to read
+      # a `packageManager` field from (see ci.yml's header — three
+      # independent lock trees, no root package), so it activated whatever
+      # pnpm release corepack currently defaults to; that pnpm then refused
+      # to run `pnpm --dir backend install` once it saw backend/package.json
+      # pin a different version than the one corepack handed it.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.1.2
+      # scripts/audit-gate.test.mjs exercises the real parser against this
+      # repo's own backend/ and frontend/ trees (not just synthetic
+      # fixtures), and the parser requires a resolvable `yaml` module from
+      # the audited directory's own node_modules — so both need an install,
+      # not just the one the test happens to name first.
+      - name: Install the lock parser's real-tree fixtures
+        run: |
+          pnpm --dir backend install --frozen-lockfile --ignore-scripts
+          pnpm --dir frontend install --frozen-lockfile --ignore-scripts
+      - name: Audit gate self-tests
+        run: node --test scripts/audit-gate.test.mjs
+
+  # Blocking for EVERY tree in the matrix below: high/critical advisories
+  # fail the build unless their GHSA id is documented (with a reason) in
+  # scripts/audit-allowlist.json — see scripts/pnpm-audit-gate.mjs. The scoped
+  # graph parser uses the pinned yaml dependency from each standalone workspace.
+  # Advisories with no non-breaking fix anywhere in the ecosystem get an
+  # allowlist entry instead of demoting the whole job to report-only (which
+  # would hide new advisories too); Dependabot (added in this PR) surfaces
+  # the upstream releases that let entries be removed.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every affected workspace; one vulnerable tree must not cancel
+      # the remaining audits and hide other updates that need attention.
+      fail-fast: false
+      matrix:
+        # The Dev fork has four pnpm lock trees; this audit covers three.
+        # desktop/ is intentionally not in this matrix yet — its pinned
+        # Electron carries 11 unallowlisted high-severity advisories
+        # (GHSA-532v-xpq5-8h95 and others, all Electron sandbox/isolation
+        # CVEs with no non-breaking fix on the currently pinned major), and
+        # adding real dependency-audit enforcement for it is a separate,
+        # deliberate piece of work — not a side effect of getting this CI
+        # green. "Verify audited lock trees" below still accounts for its
+        # lockfile existing, so this matrix staying at three is a documented
+        # choice, not a silently stale one. No root package exists.
+        include:
+          - workspace: backend
+            dir: backend
+          - workspace: frontend
+            dir: frontend
+          - workspace: word-addin
+            dir: word-addin
+    name: dependency-audit (${{ matrix.workspace }})
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      # Pinned to commit SHAs, not tags — repo-wide posture since #246:
+      # tags are mutable, so a compromised action repo could silently swap
+      # what "v4" points at; a 40-char SHA cannot be moved.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Verify audited lock trees
+        run: |
+          actual="$(find "$GITHUB_WORKSPACE" -name pnpm-lock.yaml -not -path '*/node_modules/*' -printf '%P\n' | sort)"
+          expected="$(printf 'backend/pnpm-lock.yaml\ndesktop/pnpm-lock.yaml\nfrontend/pnpm-lock.yaml\nword-addin/pnpm-lock.yaml' | sort)"
+          test "$actual" = "$expected"
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 11.1.2
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Dependency security audit
+        run: node "$GITHUB_WORKSPACE/scripts/pnpm-audit-gate.mjs"

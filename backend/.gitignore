@@ -1,7 +1,15 @@
 node_modules
 dist
+# Built frontend bundle copied in by `pnpm bundle` (and by the Dockerfile in
+# prod) — generated artifact, never committed.
+public
 .env*
-!.env.example
 *.log
+*.raw-llm-stream.json
 logs/
 .DS_Store
+
+# Stryker mutation-testing output
+reports/
+.stryker-tmp/
+stryker.log

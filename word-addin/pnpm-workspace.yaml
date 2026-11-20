@@ -1,0 +1,47 @@
+# Standalone pnpm project (like frontend/ and backend/): this file makes
+# word-addin/ its own pnpm root so installs never resolve against a parent
+# directory's workspace.
+# Build scripts of office-addin-debugging's transitive deps are not needed
+# for the dev server / sideload flow.
+allowBuilds:
+  '@azure/msal-node-extensions': false
+  '@microsoft/m365agentstoolkit-cli': false
+  '@microsoft/teamsapp-cli': false
+  '@sentry/cli': false
+  keytar: false
+overrides:
+  'body-parser@1.20.8': 1.20.9
+  'body-parser@2.3.0': 2.4.0
+  'zod@4.6.5': 4.6.7
+  # Source180 npm lock-only editor launcher update.
+  launch-editor: 2.14.2
+  # Source177 npm lock security delta, retained in Dev pnpm resolution.
+  markdown-it: ^14.3.3
+  # Development-only MCP SDK (office-addin-debugging -> teamsfx-core): hold
+  # the advisory-patched line (upstream's npm override, 54b6b3a1/57009979).
+  '@modelcontextprotocol/sdk': ^1.32.0
+  # GHSA-8r5x-fm3f-whwj / GHSA-p8wg-vrv2-v86f (critical, handlebars <=4.7.9),
+  # reached only through the same development sideload tooling.
+  handlebars: ^4.7.10
+  # GHSA-xcpc-8h2w-3j85 / GHSA-7q85-xj36-vmfc / GHSA-rcw4-f5rp-g42v /
+  # GHSA-j5f4-cc29-5x44 / GHSA-8238-w5pm-2374 (adm-zip <=0.6.0, through
+  # office-addin-debugging's M365 sideload tooling).
+  adm-zip: 0.6.1
+  # GHSA-86w9-cpqp-85rv / GHSA-7wch-p9px-956x / GHSA-jc66-7q78-782g /
+  # GHSA-8hrf-8g6f-7xwp / GHSA-hqq3-7jhf-c5jx / GHSA-5x38-2vff-x55p /
+  # GHSA-rhr8-3pm8-cq29 / GHSA-6qrw-m8cv-hcxf (node-forge <=1.4.0, through
+  # office-addin-dev-certs/mkcert and the M365 sideload tooling). The
+  # existing audit-allowlist.json entry for GHSA-86w9-cpqp-85rv said "npm
+  # registry currently publishes only 1.4.0" — 1.4.1 through 1.4.3 have
+  # since shipped; this override replaces that allowlist entry (removed
+  # below) rather than keeping both.
+  node-forge: 1.4.3
+  # GHSA-mrwp-f3q8-3g9p (follow-redirects >=1.16.0 <=1.16.1, through the
+  # same tooling's axios/dev-tunnels dependencies).
+  follow-redirects: 1.16.3
+  # GHSA-xcx6-jx8p-x3h5 (msal-node authorization-code parameter disclosure).
+  # Same advisory as backend's — see backend's @azure/identity bump for why
+  # this devDependency-only chain (no production MSAL code in this add-in)
+  # is safe to force past its declared range. This override replaces the
+  # existing audit-allowlist.json entry (removed below).
+  '@azure/msal-node': 7.2.3

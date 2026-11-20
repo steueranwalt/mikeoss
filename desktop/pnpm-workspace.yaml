@@ -1,0 +1,6 @@
+allowBuilds:
+  electron: true
+  # electron-builder's Windows installer target; pnpm's newer allow-list
+  # default (deny unless listed) started blocking its postinstall, which
+  # had always run before. No other change — same package, same script.
+  electron-winstaller: true

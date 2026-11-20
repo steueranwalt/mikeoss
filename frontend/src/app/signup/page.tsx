@@ -1,33 +1,108 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { signup } from "@/app/lib/authApi";
+import { InputUI } from "@/shared/ui/InputUI";
+import { PillButtonUI } from "@/shared/ui/PillButtonUI";
+import { pillButtonUIClassName } from "@/shared/ui/PillButtonUI.styles";
 import Link from "next/link";
-import { SiteLogo } from "@/components/site-logo";
-import { CheckCircle2 } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
-import { updateUserProfile } from "@/app/lib/mikeApi";
+import { SiteLogo } from "@/app/components/site-logo";
+import { useAuth } from "@/app/contexts/AuthContext";
+import { cn } from "@/app/lib/utils";
+import { WarningPopup } from "@/app/components/popups/WarningPopup";
+import { noticeActionClassName } from "@/shared/ui/NoticeCardUI";
+import {
+    authGlassCardUIClassName,
+    authInputUIClassName,
+} from "@/shared/ui/AuthStylesUI";
+import { reportFault,
+    UserVisibleError,
+    describeError,
+    supportMailtoFor,
+    type UserFacingError,
+} from "@/app/lib/userFacingError";
 
-export default function SignupPage() {
+
+/** A failure the form found itself, so the text is already user-facing. */
+function localSignupError(message: string): UserFacingError {
+    return describeError(
+        new UserVisibleError(message, { kind: "validation" }),
+        { action: "create your account" },
+    );
+}
+
+/**
+ * The shared auth table with this screen's deltas. Anything not listed
+ * falls through to `describeError` so a 429, a 5xx, or a dropped connection
+ * still says what actually happened.
+ */
+const SIGNUP_ERROR_MESSAGES = authMessages({
+    validation_failed: "Check your email address and password and try again.",
+    invalid_request: "Check your email address and password and try again.",
+    over_email_send_rate_limit:
+        "Too many signup emails have been requested. Wait a few minutes and try again.",
+    request_timeout: "The signup request timed out. Try again.",
+});
+
+/** Classify a signup failure into text a person can act on. */
+function describeSignupError(error: unknown): UserFacingError {
+    const described = reportFault(error, {
+        action: "create your account",
+        codeMessages: SIGNUP_ERROR_MESSAGES,
+        fallback: "Unable to create your account right now. Try again.",
+        operation: "auth.signup",
+    });
+    return described.kind === "rate_limited"
+        ? { ...described, message: TOO_MANY_ATTEMPTS_MESSAGE }
+        : described;
+}
+import {
+    MIN_PASSWORD_LENGTH,
+    isPasswordTooLong,
+    maximumPasswordMessage,
+    minimumPasswordMessage,
+} from "@/app/components/auth/passwordPolicy";
+import { TOO_MANY_ATTEMPTS_MESSAGE, authMessages } from "@/app/lib/authMessages";
+import { AuthDividerUI } from "@/shared/ui/AuthDividerUI";
+import { GoogleAuthButton } from "@/app/components/auth/GoogleAuthButton";
+import { FieldLabel } from "@/app/components/ui/form-field";
+
+function SignupContent() {
     const router = useRouter();
-    const { isAuthenticated, authLoading } = useAuth();
+    const searchParams = useSearchParams();
+    const { isAuthenticated, authLoading, refreshSession } = useAuth();
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
-    const [name, setName] = useState("");
-    const [organisation, setOrganisation] = useState("");
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<UserFacingError | null>(null);
     const [success, setSuccess] = useState(false);
+    const isAccountCreatedPreview =
+        process.env.NODE_ENV !== "production" &&
+        searchParams.get("preview") === "account-created";
 
     useEffect(() => {
-        if (!authLoading && isAuthenticated && !success) {
-            router.replace("/assistant");
+        if (isAccountCreatedPreview) return;
+        if (!authLoading && isAuthenticated && !loading && !success) {
+            router.replace("/onboarding/profile");
         }
-    }, [authLoading, isAuthenticated, router, success]);
+    }, [
+        authLoading,
+        isAccountCreatedPreview,
+        isAuthenticated,
+        loading,
+        router,
+        success,
+    ]);
+
+    useEffect(() => {
+        if (!success) return;
+        const timer = setTimeout(() => {
+            router.push("/onboarding/profile");
+        }, 2000);
+        return () => clearTimeout(timer);
+    }, [router, success]);
 
     const handleSignup = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -36,76 +111,70 @@ export default function SignupPage() {
 
         // Validate passwords match
         if (password !== confirmPassword) {
-            setError("Passwords do not match");
+            setError(localSignupError("The two passwords don't match."));
             setLoading(false);
             return;
         }
 
-        // Validate password length
-        if (password.length < 6) {
-            setError("Password must be at least 6 characters");
+        // Validate password length. The upper bound is bcrypt's 72 BYTES:
+        // GoTrue rejects anything longer, so say so before the round trip.
+        if (password.length < MIN_PASSWORD_LENGTH) {
+            setError(localSignupError(`${minimumPasswordMessage}.`));
+            setLoading(false);
+            return;
+        }
+        if (isPasswordTooLong(password)) {
+            setError(localSignupError(maximumPasswordMessage));
             setLoading(false);
             return;
         }
 
         try {
-            const { data, error } = await supabase.auth.signUp({
-                email,
+            const trimmedEmail = email.trim();
+            const result = await signup(
+                trimmedEmail,
                 password,
-            });
-
-            if (error) throw error;
-
-            if (data.session) {
-                const trimmedName = name.trim();
-                const trimmedOrg = organisation.trim();
-                if (trimmedName || trimmedOrg) {
-                    try {
-                        await updateUserProfile({
-                            ...(trimmedName && { displayName: trimmedName }),
-                            ...(trimmedOrg && { organisation: trimmedOrg }),
-                        });
-                    } catch (profileError) {
-                        console.error(
-                            "[signup] failed to persist profile fields",
-                            profileError,
-                        );
-                    }
-                }
-            }
-            setSuccess(true);
-            setTimeout(() => {
-                router.push("/assistant");
-            }, 2000);
-        } catch (error: unknown) {
-            setError(
-                error instanceof Error
-                    ? error.message
-                    : "An error occurred during signup",
+                "/onboarding/profile",
             );
+
+            if (!result.requiresEmailConfirmation) {
+                await refreshSession();
+                setSuccess(true);
+            } else {
+                router.push("/signup/check-email");
+            }
+        } catch (caught: unknown) {
+            setError(describeSignupError(caught));
         } finally {
             setLoading(false);
         }
     };
 
     // Success View
-    if (success) {
+    if (success || isAccountCreatedPreview) {
         return (
-            <div className="min-h-dvh bg-white flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+            <div className="relative flex min-h-dvh items-center justify-center bg-gray-50/80 px-6 py-10">
                 <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
-                    <SiteLogo size="md" className="md:text-4xl" asLink />
+                    <SiteLogo size="lg" asLink />
                 </div>
                 <div className="w-full max-w-md">
-                    <div className="bg-white border border-gray-200 rounded-2xl p-10 text-center shadow-sm">
-                        <div className="mx-auto w-12 h-12 bg-green-50 rounded-full flex items-center justify-center mb-6">
-                            <CheckCircle2 className="h-6 w-6 text-green-600" />
-                        </div>
-                        <h2 className="text-2xl font-semibold text-gray-900 mb-3">
+                    <div className={authGlassCardUIClassName}>
+                        <h1 className="font-serif text-2xl font-medium text-gray-950">
                             Account created!
-                        </h2>
-                        <p className="text-gray-600 leading-relaxed">
-                            Redirecting you to the home page...
+                        </h1>
+                        <p className="mt-3 text-sm leading-relaxed text-gray-600">
+                            Redirecting you to finish setting up your account...
                         </p>
+                        <Link
+                            href="/onboarding/profile"
+                            className={pillButtonUIClassName({
+                                tone: "black",
+                                size: "normal",
+                                className: "mt-6",
+                            })}
+                        >
+                            Continue
+                        </Link>
                     </div>
                 </div>
             </div>
@@ -114,172 +183,138 @@ export default function SignupPage() {
 
     // Default Signup Form View
     return (
-        <div className="min-h-dvh bg-white flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+        <div className="relative flex min-h-dvh items-center justify-center bg-gray-50/80 px-6 py-24">
             <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
-                <SiteLogo size="md" className="md:text-4xl" asLink />
+                <SiteLogo size="lg" asLink />
             </div>
             <div className="w-full max-w-md">
-                <div className="bg-white border border-gray-200 rounded-2xl p-8 mb-4">
-                    <div className="flex justify-between items-center mb-6">
-                        <h2 className="text-left text-2xl font-serif">
-                            Create Account
-                        </h2>
-                        <div className="bg-gray-100 p-1 rounded-md flex text-xs font-medium">
-                            <Link
-                                href="/login"
-                                className="px-3 py-1 text-gray-500 hover:text-gray-900"
-                            >
-                                Log in
-                            </Link>
-                            <span className="px-3 py-1 bg-white rounded-sm shadow-sm text-gray-900">
-                                Sign up
-                            </span>
-                        </div>
-                    </div>
+                <div className={cn(authGlassCardUIClassName, "mb-4")}>
+                    <h2 className="mb-6 text-left text-2xl font-medium font-serif text-gray-950">
+                        Sign Up
+                    </h2>
 
                     <form onSubmit={handleSignup} className="space-y-4">
                         <div>
-                            <label
-                                htmlFor="name"
-                                className="block text-sm font-medium text-gray-700 mb-2"
-                            >
-                                Name{" "}
-                                <span className="text-gray-400 font-normal">
-                                    (optional)
-                                </span>
-                            </label>
-                            <Input
-                                id="name"
-                                type="text"
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                                placeholder="Your name"
-                                className="w-full"
-                            />
-                        </div>
-
-                        <div>
-                            <label
-                                htmlFor="organisation"
-                                className="block text-sm font-medium text-gray-700 mb-2"
-                            >
-                                Organisation{" "}
-                                <span className="text-gray-400 font-normal">
-                                    (optional)
-                                </span>
-                            </label>
-                            <Input
-                                id="organisation"
-                                type="text"
-                                value={organisation}
-                                onChange={(e) =>
-                                    setOrganisation(e.target.value)
-                                }
-                                placeholder="Your organisation"
-                                className="w-full"
-                            />
-                        </div>
-
-                        <div>
-                            <label
-                                htmlFor="email"
-                                className="block text-sm font-medium text-gray-700 mb-2"
-                            >
+                            <FieldLabel htmlFor="email">
                                 Email
-                            </label>
-                            <Input
+                            </FieldLabel>
+                            <InputUI
                                 id="email"
                                 type="email"
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
-                                placeholder="Enter your email"
                                 required
-                                className="w-full"
+                                className={`w-full ${authInputUIClassName}`}
                             />
                         </div>
 
                         <div>
-                            <label
-                                htmlFor="password"
-                                className="block text-sm font-medium text-gray-700 mb-2"
-                            >
+                            <FieldLabel htmlFor="password">
                                 Password
-                            </label>
-                            <Input
+                            </FieldLabel>
+                            <InputUI
                                 id="password"
                                 type="password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Create a password (min. 6 characters)"
+                                placeholder={`Min. ${MIN_PASSWORD_LENGTH} Characters`}
                                 required
-                                className="w-full"
+                                className={`w-full ${authInputUIClassName}`}
                             />
                         </div>
 
                         <div>
-                            <label
-                                htmlFor="confirmPassword"
-                                className="block text-sm font-medium text-gray-700 mb-2"
-                            >
+                            <FieldLabel htmlFor="confirmPassword">
                                 Confirm Password
-                            </label>
-                            <Input
+                            </FieldLabel>
+                            <InputUI
                                 id="confirmPassword"
                                 type="password"
                                 value={confirmPassword}
                                 onChange={(e) =>
                                     setConfirmPassword(e.target.value)
                                 }
-                                placeholder="Confirm your password"
                                 required
-                                className="w-full"
+                                className={`w-full ${authInputUIClassName}`}
                             />
                         </div>
 
-                        {error && (
-                            <div className="text-red-600 text-sm bg-red-50 p-3 rounded">
-                                {error}
+                        <div className="space-y-3 pt-2">
+                            <div className="text-center text-xs text-gray-500">
+                                By signing up, you agree to our{" "}
+                                <Link
+                                    href="https://mikeoss.com/terms"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 hover:underline"
+                                >
+                                    Terms of Use
+                                </Link>{" "}
+                                and{" "}
+                                <Link
+                                    href="https://mikeoss.com/privacy"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-blue-600 hover:underline"
+                                >
+                                    Privacy Policy
+                                </Link>
                             </div>
-                        )}
-
-                        <Button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full bg-black hover:bg-gray-900 text-white"
-                        >
-                            {loading ? "Creating account..." : "Sign up"}
-                        </Button>
+                            <PillButtonUI
+                                type="submit"
+                                tone="black"
+                                size="normal"
+                                disabled={loading}
+                                className="w-full"
+                            >
+                                {loading ? "Creating account..." : "Sign up"}
+                            </PillButtonUI>
+                            <AuthDividerUI />
+                            <GoogleAuthButton
+                                onError={setError}
+                                disabled={loading}
+                                onLoadingChange={setLoading}
+                            />
+                        </div>
                     </form>
-
-                    {/* Terms and Privacy */}
-                    <div className="mt-4 text-center text-xs text-gray-500">
-                        By signing up, you agree to our{" "}
-                        <Link
-                            href="https://mikeoss.com/terms"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline"
-                        >
-                            Terms of Use
-                        </Link>{" "}
-                        and{" "}
-                        <Link
-                            href="https://mikeoss.com/privacy"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline"
-                        >
-                            Privacy Policy
-                        </Link>
-                    </div>
                 </div>
-                <p className="text-center text-xs text-gray-500 leading-relaxed px-2">
-                    Mike hosted on MikeOSS.com is currently a demo service.
-                    Please do not upload, submit, or store sensitive,
-                    confidential, privileged, client, or personally identifiable
-                    documents.
-                </p>
+                <div className="text-center text-sm text-gray-500">
+                    Have an account?{" "}
+                    <Link
+                        href="/login"
+                        className="font-medium transition-colors hover:text-gray-950"
+                    >
+                        Log in
+                    </Link>
+                </div>
             </div>
+            <WarningPopup
+                open={!!error}
+                onClose={() => setError(null)}
+                title={error?.title}
+                message={error?.message}
+                actions={
+                    error?.supportable ? (
+                        <a
+                            href={supportMailtoFor(
+                                error,
+                                "Failed to create an account.",
+                            )}
+                            className={noticeActionClassName()}
+                        >
+                            Contact support
+                        </a>
+                    ) : undefined
+                }
+            />
         </div>
+    );
+}
+
+export default function SignupPage() {
+    return (
+        <Suspense fallback={null}>
+            <SignupContent />
+        </Suspense>
     );
 }

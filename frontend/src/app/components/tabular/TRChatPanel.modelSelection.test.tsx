@@ -1,0 +1,105 @@
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+const { streamTabularChatMock } = vi.hoisted(() => ({
+    streamTabularChatMock: vi.fn(),
+}));
+
+// This harness renders authenticated work without booting the session provider.
+// Keep the real owner/generation hooks; only supply their controlled auth input.
+const authenticatedOwner = vi.hoisted(() => ({
+  user: { id: "u1", email: "owner@example.com", pendingEmail: null, createdWithGoogle: false },
+  isAuthenticated: true, authLoading: false, authError: null,
+  signOut: vi.fn(async () => {}), signInLocal: vi.fn(async () => {}),
+  getAccessToken: vi.fn(async () => "test-token"), updateEmail: vi.fn(), setPassword: vi.fn(async () => {}),
+  refreshSession: vi.fn(async () => null), retrySession: vi.fn(async () => null),
+}));
+vi.mock("@/app/contexts/AuthContext", async (original) => ({
+  ...(await original<typeof import("@/app/contexts/AuthContext")>()),
+  useAuth: () => authenticatedOwner,
+}));
+
+vi.mock("@/app/lib/mikeApi", () => ({
+    streamTabularChat: streamTabularChatMock,
+    getTabularChats: vi.fn(async () => []),
+    getTabularChatMessages: vi.fn(async () => []),
+    deleteTabularChat: vi.fn(async () => undefined),
+    renameTabularChat: vi.fn(async () => undefined),
+    mapTRMessages: vi.fn((messages) => messages),
+    // Dev drift: upstream #339 model registry — ChatInput now loads the
+    // configured-model catalog through useConfiguredModels.
+    getConfiguredModels: vi.fn(async () => []),
+}));
+
+vi.mock("@/app/contexts/UserProfileContext", () => ({
+    useUserProfile: () => ({
+        profile: {
+            tabularModel: "aoai:removed-deployment",
+            apiKeys: {
+                claude: { configured: false, source: null },
+                gemini: { configured: false, source: null },
+                openai: { configured: false, source: null },
+                openrouter: { configured: false, source: null },
+                courtlistener: { configured: false, source: null },
+                kimi: { configured: false, source: null },
+                azure_openai: { configured: true, source: "env" },
+            },
+        },
+        updateModelPreference: vi.fn(),
+    }),
+}));
+
+vi.mock("@/altien/models/aoaiDeployments", () => ({
+    useAoaiDeployments: () => ({
+        modelOptions: [
+            {
+                id: "aoai:current-deployment",
+                label: "Current",
+                group: "Azure OpenAI",
+            },
+        ],
+    }),
+}));
+
+vi.mock("../assistant/ModelToggle", () => ({
+    ModelToggle: () => <div data-testid="model-toggle" />,
+}));
+
+vi.mock("../popups/ApiKeyMissingPopup", () => ({
+    ApiKeyMissingPopup: ({ open }: { open: boolean }) =>
+        open ? <div>Model unavailable</div> : null,
+}));
+
+import { TRChatPanel } from "./TRChatPanel";
+
+beforeAll(() => {
+    vi.stubGlobal(
+        "ResizeObserver",
+        class {
+            observe() {}
+            disconnect() {}
+        },
+    );
+});
+
+describe("TRChatPanel model selection", () => {
+    it("blocks a new chat with no selected model before streaming", async () => {
+        render(
+            <TRChatPanel
+                reviewId="review-1"
+                onCitationClick={vi.fn()}
+            />,
+        );
+
+        const input = screen.getByPlaceholderText("How can I help?");
+        fireEvent.change(input, { target: { value: "Summarise this review" } });
+        fireEvent.keyDown(input, { key: "Enter" });
+
+        expect(
+            await screen.findByText("Select a model"),
+        ).toBeInTheDocument();
+        await waitFor(() =>
+            expect(streamTabularChatMock).not.toHaveBeenCalled(),
+        );
+    });
+});

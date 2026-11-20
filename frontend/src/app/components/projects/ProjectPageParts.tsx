@@ -1,21 +1,31 @@
 "use client";
 
-import { type CSSProperties, useState } from "react";
+import { useRef, useState } from "react";
 import {
-    Download,
-    File,
-    FileText,
+    Brain,
+    CornerDownRight,
     Loader2,
     Pencil,
     Plus,
+    Trash2,
     Users,
 } from "lucide-react";
-import { HeaderSearchBtn } from "@/app/components/shared/HeaderSearchBtn";
-import { RenameableTitle } from "@/app/components/shared/RenameableTitle";
-import type { MikeProject } from "@/app/components/shared/types";
-import type { MikeDocumentVersion } from "@/app/lib/mikeApi";
+import {
+    PageHeader,
+    type PageHeaderAction,
+} from "@/app/components/shared/PageHeader";
+import { FileTypeIcon } from "@/app/components/shared/FileTypeIcon";
+import type { Project } from "@/app/components/shared/types";
+import type { DocumentVersion } from "@/app/lib/mikeApi";
+import { RowActions } from "@/app/components/shared/RowActions";
+import { HeaderActionsMenu } from "@/app/components/shared/HeaderActionsMenu";
+import { DocumentUploadMenu } from "@/app/components/shared/DocumentUploadMenu";
+import { tableTreeCellStyle } from "@/app/components/shared/TablePrimitive";
 
-export type ProjectTab = "documents" | "assistant" | "reviews";
+export type ProjectWorkspaceSection =
+    | "documents"
+    | "assistant"
+    | "reviews";
 
 export type ProjectContextMenu = {
     x: number;
@@ -25,33 +35,10 @@ export type ProjectContextMenu = {
     showFolderActions: boolean;
 };
 
-export const CHECK_W = "w-8 shrink-0";
-export const NAME_COL_W = "w-[300px] shrink-0";
 export const DOC_NAME_COL_W =
-    "w-[260px] sm:w-[300px] md:w-[360px] lg:w-[420px] xl:w-[500px] 2xl:w-[560px] shrink-0";
+    "w-[292px] sm:w-[332px] md:w-[392px] lg:w-[452px] xl:w-[532px] 2xl:w-[592px] shrink-0";
 
-const TREE_CONTROL_WIDTH_PX = 32;
-const TREE_NAME_PADDING_PX = 8;
-
-function treeControlWidth(depth: number) {
-    return TREE_CONTROL_WIDTH_PX * (Math.max(0, depth) + 1);
-}
-
-export function treeControlCellStyle(depth: number): CSSProperties | undefined {
-    if (depth <= 0) return undefined;
-    const width = treeControlWidth(depth);
-    return {
-        justifyContent: "flex-start",
-        minWidth: width,
-        paddingLeft: TREE_NAME_PADDING_PX + depth * TREE_CONTROL_WIDTH_PX,
-        width,
-    };
-}
-
-export function treeNameCellStyle(depth: number): CSSProperties | undefined {
-    if (depth <= 0) return undefined;
-    return { left: treeControlWidth(depth) };
-}
+export const treeNameCellStyle = tableTreeCellStyle;
 
 export function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -67,28 +54,58 @@ export function formatDate(iso: string) {
     });
 }
 
-export function DocIcon({ fileType }: { fileType: string | null }) {
-    if (fileType === "pdf")
-        return <FileText className="h-4 w-4 text-red-600 shrink-0" />;
-    if (fileType === "docx" || fileType === "doc")
-        return <File className="h-4 w-4 text-blue-600 shrink-0" />;
-    return <File className="h-4 w-4 text-gray-500 shrink-0" />;
+export function DocIcon({
+    fileType,
+    muted = false,
+    warning = null,
+}: {
+    fileType: string | null;
+    muted?: boolean;
+    /** Shown as a badge on the icon, e.g. a PDF without a text layer. */
+    warning?: string | null;
+}) {
+    const icon = (
+        <FileTypeIcon fileType={fileType} className="h-3.5 w-3.5" muted={muted} />
+    );
+    if (!warning) return icon;
+    return (
+        <span
+            className="relative inline-flex"
+            title={warning}
+            aria-label={warning}
+            role="img"
+        >
+            {icon}
+            <span
+                aria-hidden="true"
+                className="absolute -bottom-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-amber-500 text-[7px] font-bold leading-none text-white ring-1 ring-white"
+            >
+                !
+            </span>
+        </span>
+    );
 }
 
 export function DocVersionHistory({
     docId,
     filename,
+    activeVersionNumber,
+    currentVersionId,
     loading,
     versions,
     depth = 0,
     onDownloadVersion,
     onOpenVersion,
     onRenameVersion,
+    onExtensionChangeBlocked,
+    showCreator = false,
 }: {
     docId: string;
     filename: string;
+    activeVersionNumber: number | null;
+    currentVersionId: string | null;
     loading: boolean;
-    versions: MikeDocumentVersion[];
+    versions: DocumentVersion[];
     depth?: number;
     onDownloadVersion: (
         docId: string,
@@ -98,50 +115,91 @@ export function DocVersionHistory({
     onOpenVersion?: (versionId: string, versionLabel: string) => void;
     onRenameVersion?: (
         versionId: string,
-        displayName: string | null,
+        filename: string | null,
     ) => Promise<void> | void;
+    onExtensionChangeBlocked?: (filename: string) => void;
+    /** Keeps the rows aligned with a table that shows a Creator column. */
+    showCreator?: boolean;
 }) {
     const [editingVersionId, setEditingVersionId] = useState<string | null>(
         null,
     );
     const [editingValue, setEditingValue] = useState("");
+    const committingVersionId = useRef<string | null>(null);
 
     const commit = async (versionId: string) => {
+        if (committingVersionId.current === versionId) return;
         const trimmed = editingValue.trim();
+        const previousFilename = versions
+            .find((version) => version.id === versionId)
+            ?.filename?.trim();
+        if (
+            previousFilename &&
+            (trimmed.length === 0 ||
+                hasFilenameExtensionChange(previousFilename, trimmed))
+        ) {
+            onExtensionChangeBlocked?.(previousFilename);
+            return;
+        }
+
+        committingVersionId.current = versionId;
         setEditingVersionId(null);
         const next = trimmed.length > 0 ? trimmed : null;
         await onRenameVersion?.(versionId, next);
     };
 
     if (loading && versions.length === 0) {
+        const skeletonCount = Math.max(0, (activeVersionNumber ?? 1) - 1);
         return (
-            <div className="flex items-center h-9 border-b border-gray-50 text-xs text-gray-500 bg-gray-50/60">
-                <div
-                    className={`sticky left-0 z-[60] ${CHECK_W} bg-gray-50/60 self-stretch`}
-                    style={treeControlCellStyle(depth)}
-                />
-                <div
-                    className={`sticky left-8 z-[60] ${DOC_NAME_COL_W} bg-gray-50/60 p-2`}
-                    style={treeNameCellStyle(depth)}
-                >
-                    <div className="flex items-center gap-2">
-                        <Loader2 className="h-3 w-3 animate-spin text-gray-400" />
-                        <span>Loading versions…</span>
+            <>
+                {Array.from({ length: skeletonCount }).map((_, index) => (
+                    <div
+                        key={`ver-skeleton-${docId}-${index}`}
+                        className="flex h-10 min-w-max items-center bg-gray-100 pr-3"
+                    >
+                        <div
+                            className={`sticky left-0 z-[60] ${DOC_NAME_COL_W} bg-gray-100 py-2 pl-3 pr-2`}
+                            style={treeNameCellStyle(depth)}
+                        >
+                            <div className="flex items-center">
+                                <div className="mr-3 h-2.5 w-2.5 shrink-0 rounded bg-gray-200 animate-pulse" />
+                                <div className="mr-2 h-4 w-4 shrink-0 rounded bg-gray-200 animate-pulse" />
+                                <div className="mr-2 h-4 w-4 shrink-0 rounded bg-gray-200 animate-pulse" />
+                                <div className="h-3 w-32 rounded bg-gray-200 animate-pulse" />
+                            </div>
+                        </div>
+                        <div className="ml-auto w-20 shrink-0">
+                            <div className="h-3 w-8 rounded bg-gray-200 animate-pulse" />
+                        </div>
+                        <div className="w-24 shrink-0">
+                            <div className="h-3 w-10 rounded bg-gray-200 animate-pulse" />
+                        </div>
+                        <div className="w-20 shrink-0 pl-1">
+                            <div className="h-3 w-5 rounded bg-gray-200 animate-pulse" />
+                        </div>
+                        {showCreator && (
+                            <div className="w-32 shrink-0">
+                                <div className="h-3 w-16 rounded bg-gray-200 animate-pulse" />
+                            </div>
+                        )}
+                        <div className="w-32 shrink-0">
+                            <div className="h-3 w-16 rounded bg-gray-200 animate-pulse" />
+                        </div>
+                        <div className="w-32 shrink-0">
+                            <div className="h-3 w-10 rounded bg-gray-200 animate-pulse" />
+                        </div>
+                        <div className="w-8 shrink-0" />
                     </div>
-                </div>
-            </div>
+                ))}
+            </>
         );
     }
 
     if (versions.length === 0) {
         return (
-            <div className="flex items-center h-9 border-b border-gray-50 text-xs text-gray-400 bg-gray-50/60">
+            <div className="flex items-center h-9 border-b border-gray-50 text-xs text-gray-400 bg-gray-50/80">
                 <div
-                    className={`sticky left-0 z-[60] ${CHECK_W} bg-gray-50/60 self-stretch`}
-                    style={treeControlCellStyle(depth)}
-                />
-                <div
-                    className={`sticky left-8 z-[60] ${DOC_NAME_COL_W} bg-gray-50/60 p-2`}
+                    className={`sticky left-0 z-[60] ${DOC_NAME_COL_W} bg-gray-50/80 py-2 pl-3 pr-2`}
                     style={treeNameCellStyle(depth)}
                 >
                     <div>No version history.</div>
@@ -150,10 +208,15 @@ export function DocVersionHistory({
         );
     }
 
-    const ordered = [...versions].reverse();
+    const olderVersions = versions.filter((v) => v.id !== currentVersionId);
+    if (olderVersions.length === 0) return null;
+
+    const ordered = [...olderVersions].reverse();
     return (
         <>
             {ordered.map((v) => {
+                const versionFileType = v.file_type ?? null;
+                const isDeleted = v.deleted_at != null;
                 const numberLabel =
                     typeof v.version_number === "number" &&
                     v.version_number >= 1
@@ -161,7 +224,8 @@ export function DocVersionHistory({
                         : v.source === "upload"
                           ? "Original"
                           : "—";
-                const displayLabel = v.display_name?.trim() || numberLabel;
+                const displayLabel = v.filename?.trim() || numberLabel;
+                const downloadFilename = v.filename?.trim() || filename;
                 const dt = new Date(v.created_at);
                 const dateLabel = Number.isNaN(dt.valueOf())
                     ? ""
@@ -173,27 +237,44 @@ export function DocVersionHistory({
                           minute: "2-digit",
                       });
                 const isEditing = editingVersionId === v.id;
-
+                const rowBg = isDeleted ? "bg-gray-50" : "bg-gray-100";
+                const hoverBg = isDeleted ? "hover:bg-gray-50" : "hover:bg-gray-200";
                 return (
                     <div
                         key={`ver-${docId}-${v.id}`}
                         onClick={() => {
-                            if (isEditing) return;
+                            if (isEditing || isDeleted) return;
                             onOpenVersion?.(v.id, displayLabel);
                         }}
-                        className="group flex items-center h-9 pr-3 md:pr-10 border-b border-gray-50 bg-gray-50/60 text-xs text-gray-600 cursor-pointer hover:bg-gray-100/80 transition-colors"
+                        className={`group flex h-10 min-w-max items-center pr-3 text-xs transition-colors ${rowBg} ${hoverBg} ${
+                            isDeleted
+                                ? "cursor-default text-gray-300"
+                                : "cursor-pointer text-gray-500"
+                        }`}
                     >
                         <div
-                            className={`sticky left-0 z-[60] ${CHECK_W} bg-gray-50/60 group-hover:bg-gray-100/80 self-stretch`}
-                            style={treeControlCellStyle(depth)}
-                        />
-                        <div
-                            className={`sticky left-8 z-[60] ${DOC_NAME_COL_W} bg-gray-50/60 group-hover:bg-gray-100/80 p-2`}
+                            className={`sticky left-0 z-[60] ${DOC_NAME_COL_W} ${rowBg} py-2 pl-3 pr-2 transition-colors ${
+                                isDeleted ? "group-hover:bg-gray-50" : "group-hover:bg-gray-200"
+                            }`}
                             style={treeNameCellStyle(depth)}
                         >
-                            <div className="flex items-center gap-2">
-                                <span className="shrink-0 text-gray-400">
-                                    ↳
+                            <div className="flex items-center">
+                                <span className="mr-3 h-2.5 w-2.5 shrink-0" />
+                                <span className="mr-2 flex h-4 w-4 shrink-0 items-center justify-center">
+                                    <CornerDownRight
+                                        className={`h-3.5 w-3.5 ${
+                                            isDeleted
+                                                ? "text-gray-300"
+                                                : "text-gray-400"
+                                        }`}
+                                        aria-hidden="true"
+                                    />
+                                </span>
+                                <span className="mr-2 shrink-0">
+                                    <DocIcon
+                                        fileType={versionFileType}
+                                        muted={isDeleted}
+                                    />
                                 </span>
                                 {isEditing ? (
                                     <input
@@ -208,57 +289,101 @@ export function DocVersionHistory({
                                                 e.preventDefault();
                                                 void commit(v.id);
                                             } else if (e.key === "Escape") {
+                                                committingVersionId.current = null;
                                                 setEditingVersionId(null);
                                             }
                                         }}
                                         onBlur={() => void commit(v.id)}
-                                        className="min-w-0 flex-1 max-w-[240px] border-b border-gray-300 bg-transparent text-xs text-gray-800 outline-none focus:border-gray-500"
+                                        className="min-w-0 flex-1 border-b border-gray-300 bg-transparent text-xs text-gray-800 outline-none focus:border-gray-500"
                                     />
                                 ) : (
-                                    <span className="font-medium text-gray-700 truncate">
+                                    <span
+                                        className={`truncate text-xs ${
+                                            isDeleted
+                                                ? "text-gray-300"
+                                                : "text-gray-700"
+                                        }`}
+                                    >
+                                        {isDeleted && (
+                                            <span className="font-medium text-gray-500">
+                                                [Deleted]{" "}
+                                            </span>
+                                        )}
                                         {displayLabel}
                                     </span>
                                 )}
-                                {!isEditing && onRenameVersion && (
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            setEditingVersionId(v.id);
-                                            setEditingValue(
-                                                v.display_name ?? "",
-                                            );
-                                        }}
-                                        title="Rename version"
-                                        className="shrink-0 rounded p-0.5 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-700 hover:bg-gray-200 transition"
-                                    >
-                                        <Pencil className="h-3 w-3" />
-                                    </button>
-                                )}
-                                <span className="text-gray-400 truncate">
-                                    {dateLabel}
-                                </span>
-                                <span className="text-gray-300 shrink-0">
-                                    ·
-                                </span>
-                                <span className="text-gray-400 truncate">
-                                    {v.source}
-                                </span>
                             </div>
                         </div>
-                        <div className="ml-auto w-20 shrink-0" />
-                        <div className="w-24 shrink-0" />
-                        <div className="ml-auto w-20 shrink-0" />
-                        <div className="w-8 shrink-0 flex justify-end">
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDownloadVersion(docId, v.id, filename);
-                                }}
-                                title="Download this version"
-                                className="flex items-center justify-center w-6 h-6 rounded text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors"
-                            >
-                                <Download className="h-3.5 w-3.5" />
-                            </button>
+                        <div
+                            className={`ml-auto w-20 shrink-0 truncate text-xs uppercase ${
+                                isDeleted ? "text-gray-300" : "text-gray-500"
+                            }`}
+                        >
+                            {versionFileType ?? (
+                                <span className="text-gray-300">—</span>
+                            )}
+                        </div>
+                        <div className="w-24 shrink-0 truncate text-xs text-gray-400">
+                            —
+                        </div>
+                        <div
+                            className={`w-20 shrink-0 truncate pl-1 text-xs ${
+                                isDeleted ? "text-gray-300" : "text-gray-500"
+                            }`}
+                        >
+                            {numberLabel}
+                        </div>
+                        {showCreator && (
+                            <div className="w-32 shrink-0 truncate text-xs text-gray-400">
+                                —
+                            </div>
+                        )}
+                        <div
+                            className={`w-32 shrink-0 truncate text-xs ${
+                                isDeleted ? "text-gray-300" : "text-gray-500"
+                            }`}
+                        >
+                            {dateLabel ? formatDate(v.created_at) : <span className="text-gray-300">—</span>}
+                        </div>
+                        <div className="w-32 shrink-0 truncate text-xs text-gray-400">
+                            —
+                        </div>
+                        <div
+                            className="w-8 shrink-0 flex justify-end"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            {!isDeleted && (
+                                <RowActions
+                                    onView={
+                                        onOpenVersion
+                                            ? () =>
+                                                  onOpenVersion(
+                                                      v.id,
+                                                      displayLabel,
+                                                  )
+                                            : undefined
+                                    }
+                                    onRename={
+                                        onRenameVersion
+                                            ? () => {
+                                                  committingVersionId.current = null;
+                                                  setEditingVersionId(v.id);
+                                                  setEditingValue(
+                                                      v.filename ?? "",
+                                                  );
+                                              }
+                                            : undefined
+                                    }
+                                    renameLabel="Rename version"
+                                    onDownload={() =>
+                                        onDownloadVersion(
+                                            docId,
+                                            v.id,
+                                            downloadFilename,
+                                        )
+                                    }
+                                />
+                            )}
                         </div>
                     </div>
                 );
@@ -267,199 +392,183 @@ export function DocVersionHistory({
     );
 }
 
-export function ProjectPageSkeleton() {
+export function ProjectPageHeader({
+    project,
+    search,
+    activeSection,
+    creatingReview,
+    canManageProject,
+    roleKnown = true,
+    onBackToProjects,
+    onProjectRoot,
+    onOpenDetails,
+    onOpenMemory,
+    onDeleteProject,
+    onSearchChange,
+    onOpenAccess,
+    onNewChat,
+    onNewReview,
+    onSavedFiles,
+    onUploadFiles,
+    onUploadFolder,
+    documentFolderBreadcrumbs,
+}: {
+    project: Project | null;
+    search: string;
+    activeSection: ProjectWorkspaceSection;
+    creatingReview: boolean;
+    /** Whether the caller holds access.manage on this project. */
+    canManageProject: boolean;
+    /**
+     * False while the project row — and with it the caller's role — is still
+     * loading. Role-gated menu items disable themselves rather than offering
+     * an action whose outcome nobody knows yet.
+     */
+    roleKnown?: boolean;
+    onBackToProjects: () => void;
+    onProjectRoot: () => void;
+    onOpenDetails: () => void;
+    onOpenMemory: () => void;
+    onDeleteProject: () => void;
+    onSearchChange: (search: string) => void;
+    onOpenAccess: () => void;
+    onNewChat: () => void;
+    onNewReview: () => void;
+    onSavedFiles?: (() => void) | null;
+    onUploadFiles?: (() => void) | null;
+    onUploadFolder?: (() => void) | null;
+    documentFolderBreadcrumbs?: Array<{
+        label: string;
+        onClick: () => void;
+    }>;
+}) {
+    const sectionAction: PageHeaderAction | null =
+        activeSection === "documents"
+            ? {
+                  type: "custom",
+                  render: (
+                      <DocumentUploadMenu
+                          onSavedFiles={onSavedFiles ?? null}
+                          onUploadFiles={onUploadFiles ?? null}
+                          onUploadFolder={onUploadFolder ?? null}
+                      />
+                  ),
+              }
+            : activeSection === "assistant"
+              ? {
+                    onClick: onNewChat,
+                    disabled: !roleKnown,
+                    icon: <Plus className="h-4 w-4" />,
+                    label: <span className="hidden sm:inline">Chat</span>,
+                    title: "Create chat",
+                }
+              : activeSection === "reviews"
+                ? {
+                    onClick: onNewReview,
+                    disabled: creatingReview || !roleKnown,
+                    icon: creatingReview ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                        <Plus className="h-4 w-4" />
+                    ),
+                    label: <span className="hidden sm:inline">Review</span>,
+                    title: "Create review",
+                  }
+                : null;
+
     return (
-        <div className="flex-1 overflow-y-auto bg-white">
-            <div className="mb-1 flex items-start justify-between px-4 py-3 md:px-10">
-                <div className="flex items-center gap-1.5 text-2xl font-medium font-serif">
-                    <span className="text-gray-400">Projects</span>
-                    <span className="text-gray-300">›</span>
-                    <div className="h-6 w-40 rounded bg-gray-100 animate-pulse" />
-                </div>
-                <div className="flex items-center gap-4">
-                    <div className="h-8 w-8 rounded bg-gray-100 animate-pulse" />
-                    <div className="h-8 w-8 rounded bg-gray-100 animate-pulse" />
-                    <div className="h-8 w-11 rounded bg-gray-100 animate-pulse" />
-                    <div className="h-8 w-28 rounded bg-gray-100 animate-pulse" />
-                </div>
-            </div>
-            <div className="flex items-center h-10 px-4 md:px-10 border-b border-gray-200 gap-5">
-                <div className="h-3 w-20 rounded bg-gray-100 animate-pulse" />
-                <div className="h-3 w-10 rounded bg-gray-100 animate-pulse" />
-                <div className="h-3 w-24 rounded bg-gray-100 animate-pulse" />
-                <div className="ml-auto flex items-center gap-5">
-                    <div className="h-3 w-24 rounded bg-gray-100 animate-pulse" />
-                    <div className="h-3 w-24 rounded bg-gray-100 animate-pulse" />
-                </div>
-            </div>
-            <div className="flex items-center h-8 pr-3 md:pr-10 border-b border-gray-200">
-                <div className="w-8 shrink-0" />
-                <div className="flex-1 min-w-0 pl-3 pr-4">
-                    <div className="h-2.5 w-8 rounded bg-gray-100 animate-pulse" />
-                </div>
-                <div className="w-20 shrink-0">
-                    <div className="h-2.5 w-8 rounded bg-gray-100 animate-pulse" />
-                </div>
-                <div className="w-24 shrink-0">
-                    <div className="h-2.5 w-8 rounded bg-gray-100 animate-pulse" />
-                </div>
-                <div className="w-8 shrink-0" />
-            </div>
-            {[1, 2, 3, 4, 5].map((i) => (
-                <div
-                    key={i}
-                    className="flex items-center h-10 pr-3 md:pr-10 border-b border-gray-50"
-                >
-                    <div className="w-8 shrink-0" />
-                    <div className="flex-1 min-w-0 pl-3 pr-4">
-                        <div className="h-3.5 w-56 rounded bg-gray-100 animate-pulse" />
-                    </div>
-                    <div className="w-20 shrink-0">
-                        <div className="h-3 w-8 rounded bg-gray-100 animate-pulse" />
-                    </div>
-                    <div className="w-24 shrink-0">
-                        <div className="h-3 w-12 rounded bg-gray-100 animate-pulse" />
-                    </div>
-                    <div className="w-8 shrink-0" />
-                </div>
-            ))}
-        </div>
+        <PageHeader
+            breadcrumbs={[
+                {
+                    label: "Projects",
+                    onClick: onBackToProjects,
+                    title: "Back to Projects",
+                },
+                {
+                    ...(project
+                        ? {
+                              label: project.name,
+                              onClick: onProjectRoot,
+                              title: "Back to project documents",
+                          }
+                        : {
+                              loading: true,
+                              skeletonClassName: "w-40",
+                          }),
+                },
+                ...(activeSection === "assistant"
+                    ? [{ label: "Chats" }]
+                    : activeSection === "reviews"
+                      ? [{ label: "Tabular Reviews" }]
+                      : (documentFolderBreadcrumbs ?? [])),
+            ]}
+            actionGroups={[
+                [
+                    {
+                        type: "search",
+                        value: search,
+                        onChange: onSearchChange,
+                        placeholder: "Search…",
+                    },
+                    {
+                        onClick: onOpenAccess,
+                        iconOnly: true,
+                        title: "Access",
+                        icon: <Users className="h-4 w-4" />,
+                    },
+                    {
+                        type: "custom",
+                        render: (
+                            <HeaderActionsMenu
+                                items={[
+                                    {
+                                        label: canManageProject
+                                            ? "Edit details"
+                                            : "View details",
+                                        icon: Pencil,
+                                        onSelect: onOpenDetails,
+                                        disabled: !roleKnown,
+                                    },
+                                    {
+                                        label: "Memory",
+                                        icon: Brain,
+                                        onSelect: onOpenMemory,
+                                        disabled: !roleKnown,
+                                    },
+                                    {
+                                        // Kept visible below admin so the
+                                        // refusal can name someone who can
+                                        // lift it; disabled only while the
+                                        // role itself is still unknown.
+                                        label: "Delete",
+                                        icon: Trash2,
+                                        onSelect: onDeleteProject,
+                                        variant: "danger",
+                                        disabled: !roleKnown,
+                                    },
+                                ]}
+                            />
+                        ),
+                    },
+                ],
+                [sectionAction],
+            ]}
+        />
     );
 }
 
-export function ProjectPageHeader({
-    project,
-    tab,
-    search,
-    creatingChat,
-    creatingReview,
-    docsCount,
-    onBackToProjects,
-    onOpenDocuments,
-    onTitleCommit,
-    onSearchChange,
-    onOpenPeople,
-    onNewChat,
-    onNewReview,
-}: {
-    project: MikeProject;
-    tab: ProjectTab;
-    search: string;
-    creatingChat: boolean;
-    creatingReview: boolean;
-    docsCount: number;
-    onBackToProjects: () => void;
-    onOpenDocuments: () => void;
-    onTitleCommit: (newName: string) => void | Promise<void>;
-    onSearchChange: (search: string) => void;
-    onOpenPeople: () => void;
-    onNewChat: () => void;
-    onNewReview: () => void;
-}) {
+function filenameExtension(filename: string) {
+    const trimmed = filename.trim();
+    const dotIndex = trimmed.lastIndexOf(".");
+    if (dotIndex <= 0 || dotIndex === trimmed.length - 1) return null;
+    return trimmed.slice(dotIndex);
+}
+
+function hasFilenameExtensionChange(previous: string, next: string) {
+    const previousExtension = filenameExtension(previous);
+    if (previousExtension == null) return false;
     return (
-        <div className="mb-1 flex items-start justify-between px-4 py-3 md:px-10">
-            <div>
-                <div className="flex items-center gap-1.5 text-2xl font-medium font-serif">
-                    <button
-                        onClick={onBackToProjects}
-                        className="text-gray-400 hover:text-gray-600 transition-colors"
-                    >
-                        Projects
-                    </button>
-                    <span className="text-gray-300">›</span>
-                    {tab !== "documents" ? (
-                        <button
-                            onClick={onOpenDocuments}
-                            className="text-gray-500 hover:text-gray-700 transition-colors"
-                        >
-                            {project.name}
-                            {project.cm_number ? (
-                                <span className="ml-1 text-gray-400">
-                                    (#{project.cm_number})
-                                </span>
-                            ) : null}
-                        </button>
-                    ) : (
-                        <RenameableTitle
-                            value={project.name}
-                            onCommit={onTitleCommit}
-                            suffix={
-                                project.cm_number ? (
-                                    <span className="ml-1 text-gray-400">
-                                        (#{project.cm_number})
-                                    </span>
-                                ) : null
-                            }
-                        />
-                    )}
-                    {tab !== "documents" && (
-                        <>
-                            <span className="text-gray-300">›</span>
-                            <span className="text-gray-900">
-                                {tab === "assistant"
-                                    ? "Assistant"
-                                    : "Tabular Reviews"}
-                            </span>
-                        </>
-                    )}
-                </div>
-            </div>
-            <div className="flex items-center gap-4">
-                <HeaderSearchBtn
-                    value={search}
-                    onChange={onSearchChange}
-                    placeholder="Search…"
-                />
-                <button
-                    onClick={onOpenPeople}
-                    className="flex h-8 w-8 items-center justify-center text-sm text-gray-500 transition-colors hover:text-gray-900 cursor-pointer"
-                    title="People with access"
-                    aria-label="People with access"
-                >
-                    <Users className="h-4 w-4" />
-                </button>
-                <div className="relative group">
-                    <button
-                        onClick={() => !creatingChat && onNewChat()}
-                        className={`flex h-8 items-center justify-center gap-1.5 text-sm transition-colors ${
-                            !creatingChat
-                                ? "text-gray-500 hover:text-gray-900 cursor-pointer"
-                                : "text-gray-300 cursor-default"
-                        }`}
-                    >
-                        {creatingChat ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                            <Plus className="h-4 w-4" />
-                        )}
-                        Chat
-                    </button>
-                </div>
-                <div className="relative group">
-                    <button
-                        onClick={() =>
-                            docsCount > 0 && !creatingReview && onNewReview()
-                        }
-                        className={`flex h-8 items-center justify-center gap-1.5 text-sm transition-colors ${
-                            docsCount > 0
-                                ? "text-gray-500 hover:text-gray-900 cursor-pointer"
-                                : "text-gray-300 cursor-default"
-                        }`}
-                    >
-                        {creatingReview ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                            <Plus className="h-4 w-4" />
-                        )}
-                        Tabular Review
-                    </button>
-                    {docsCount === 0 && (
-                        <div className="pointer-events-none absolute right-0 top-full mt-1.5 z-10 hidden group-hover:flex items-center whitespace-nowrap rounded-lg bg-gray-900 px-2.5 py-1.5 text-xs text-white shadow-lg">
-                            Upload a document first
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div>
+        filenameExtension(next)?.toLowerCase() !==
+        previousExtension.toLowerCase()
     );
 }

@@ -1,956 +1,794 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { useRouter } from "next/navigation";
-import { streamChat, streamProjectChat } from "@/app/lib/mikeApi";
+import { stopChatTurn, streamChat, streamProjectChat } from "@/app/lib/mikeApi";
+import {
+  createTurnCursor,
+  createTurnEventSink,
+  isAbortError,
+  readAssistantTurn,
+} from "@/app/lib/assistantTurnStream";
+import {
+  beginAssistantTurn,
+  cancelAssistantTurn,
+  getAssistantTurn,
+  hasAssistantTurn,
+  loadAssistantChat,
+  subscribeAssistantTurns,
+  withLiveTurn,
+  type AssistantTurnHandle,
+  type LiveAssistantTurn,
+} from "@/app/lib/assistantTurns";
+import { assistantHistoryContent } from "@/app/lib/assistantHistoryContent";
+import { reportError } from "@/app/lib/errorReporting";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
-import { useGenerateChatTitle } from "./useGenerateChatTitle";
-import type {
-    AssistantEvent,
-    MikeCitationAnnotation,
-    MikeMessage,
-} from "@/app/components/shared/types";
+import { useWorkspaceIdentity } from "@/app/hooks/useWorkspaceIdentity";
+import { useWorkspaceOrgId } from "@/app/contexts/WorkspaceContext";
+import {
+  UserVisibleError,
+  describeError,
+  notifyError,
+  type Operation,
+  notifyInfo,
+} from "@/app/lib/userFacingError";
+import {
+  CHAT_CHANGED_MESSAGE,
+  TURN_FAILED_MESSAGE,
+  checkHistoryLabel,
+  errorFrameFailure,
+  isUncertainDelivery,
+  uncertainDeliveryError,
+} from "@/app/lib/chatTurnFailure";
+import type { AssistantEvent, Message } from "@/app/components/shared/types";
 
 interface UseAssistantChatOptions {
-    initialMessages?: MikeMessage[];
-    chatId?: string;
-    projectId?: string;
+  initialMessages?: Message[];
+  chatId?: string;
+  projectId?: string;
+  /** Adopts the server id as soon as it arrives, without navigation. */
+  onChatCreated?: (chatId: string) => void;
+  /**
+   * Whether this is the chat the app shell treats as current (the sidebar's
+   * highlighted row). False for a chat shown beside the primary one.
+   */
+  tracksCurrentChat?: boolean;
 }
 
-function findLastContentIndex(events: AssistantEvent[]): number {
-    for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i].type === "content") return i;
-    }
-    return -1;
-}
 
 export function useAssistantChat({
-    initialMessages = [],
-    chatId: initialChatId,
-    projectId,
+  initialMessages = [],
+  chatId: initialChatId,
+  projectId,
+  onChatCreated,
+  tracksCurrentChat = true,
 }: UseAssistantChatOptions = {}) {
-    const router = useRouter();
-    const {
-        replaceChatId,
-        loadChats,
-        setCurrentChatId,
-        saveChat,
-        setNewChatMessages,
-    } = useChatHistoryContext();
-    const { generate: generateTitle } = useGenerateChatTitle();
+  const router = useRouter();
+  const {
+    replaceChatId,
+    loadChats,
+    setCurrentChatId: setHistoryCurrentChatId,
+    saveChat,
+    setNewChatMessages,
+    updateChatTitle,
+  } = useChatHistoryContext();
+  const setCurrentChatId = (id: string | null) => {
+    if (tracksCurrentChat) setHistoryCurrentChatId(id);
+  };
+  const workspaceOrgId = useWorkspaceOrgId();
+  const workspaceIdentity = useWorkspaceIdentity();
+  const workspaceIdentityRef = useRef(workspaceIdentity);
+  useLayoutEffect(() => {
+    workspaceIdentityRef.current = workspaceIdentity;
+  }, [workspaceIdentity]);
 
-    const [messages, setMessages] = useState<MikeMessage[]>(initialMessages);
-    const [isResponseLoading, setIsResponseLoading] = useState(false);
-    const [isLoadingCitations, setIsLoadingCitations] = useState(false);
-    const [chatId, setChatId] = useState<string | undefined>(initialChatId);
+  const [messages, setRawMessages] = useState<Message[]>(initialMessages);
+  // Mirrors `messages` for the async send path: a turn started from a toast
+  // Retry runs long after the render that raised it.
+  const messagesRef = useRef<Message[]>(messages);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  const [isResponseLoading, setIsResponseLoading] = useState(false);
+  // An object, not a bare model id: an ask-inputs response submits without a
+  // model, and a null id has to still open the popup — the id only decides
+  // whether the provider can be named.
+  const [rejectedApiKey, setRejectedApiKey] = useState<{
+    model: string | null;
+  } | null>(null);
+  const [isLoadingCitations, setIsLoadingCitations] = useState(false);
+  const [chatId, setChatId] = useState<string | undefined>(initialChatId);
+  // Mirrors `chatId` for the async send path. A turn started from a toast
+  // Retry runs long after the render that raised it, and the state value
+  // captured by that render is the one from *before* the stream assigned the
+  // chat its id — sending it would create a second chat for the same turn.
+  const chatIdRef = useRef<string | undefined>(initialChatId);
 
-    const abortControllerRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    chatIdRef.current = initialChatId;
+    setChatId(initialChatId);
+  }, [initialChatId]);
 
-    const dripIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const dripTargetRef = useRef<string>("");
-    const dripDisplayLenRef = useRef<number>(0);
-    const eventsRef = useRef<AssistantEvent[]>([]);
-    const DRIP_CHARS_PER_TICK = 8;
-
-    const stopDrip = () => {
-        if (dripIntervalRef.current !== null) {
-            clearInterval(dripIntervalRef.current);
-            dripIntervalRef.current = null;
-        }
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
     };
+  }, []);
+  const viewedChatId = initialChatId ?? chatId;
+  const pendingTurn = useSyncExternalStore(
+    subscribeAssistantTurns,
+    () => hasAssistantTurn(viewedChatId),
+    () => false,
+  );
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const registeredTurnRef = useRef<AssistantTurnHandle | null>(null);
+  const requestGenerationRef = useRef(0);
 
-    const updateLastContentEvent = (
-        prev: MikeMessage[],
-        text: string,
-        isStreaming?: boolean,
-    ): MikeMessage[] => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (last?.role !== "assistant") return prev;
-        const events = last.events ?? [];
-        const idx = findLastContentIndex(events);
-        if (idx < 0) return prev;
-        const current = events[idx];
-        if (
-            current.type === "content" &&
-            current.text === text &&
-            !!current.isStreaming === !!isStreaming
-        ) {
-            return prev;
-        }
-        const newEvents = [...events];
-        newEvents[idx] = isStreaming
-            ? { type: "content", text, isStreaming: true }
-            : { type: "content", text };
-        updated[updated.length - 1] = { ...last, events: newEvents };
-        return updated;
+  // The turn this hook renders. While it streams, every change to its
+  // assistant message is mirrored into `messages`; whichever hook is looking
+  // at the thread — the one that sent the request, or one that came back to
+  // it — shows the same live answer. Once the turn has finished the record
+  // stays attached until the thread changes, so a history read that started
+  // before the answer was stored cannot erase it from the screen.
+  const attachedTurnRef = useRef<LiveAssistantTurn | null>(null);
+  const unsubscribeTurnRef = useRef<(() => void) | null>(null);
+  const attachToTurn = useCallback((live: LiveAssistantTurn | null) => {
+    if (live === attachedTurnRef.current) return;
+    unsubscribeTurnRef.current?.();
+    unsubscribeTurnRef.current = null;
+    attachedTurnRef.current = live;
+    if (!live) return;
+    const mirror = () => {
+      setRawMessages((prev) => withLiveTurn(prev, live));
+      setIsLoadingCitations(live.loadingCitations);
+      if (live.finished) {
+        unsubscribeTurnRef.current?.();
+        unsubscribeTurnRef.current = null;
+      }
     };
-
-    const flushDrip = () => {
-        stopDrip();
-        const target = dripTargetRef.current;
-        dripDisplayLenRef.current = target.length;
-        setMessages((prev) => updateLastContentEvent(prev, target));
+    unsubscribeTurnRef.current = live.subscribe(mirror);
+    mirror();
+  }, []);
+  // Hosts replace the transcript when a thread's history arrives. The turn
+  // in flight is laid over whatever they set, so the answer streaming into
+  // this thread is never displaced by a snapshot taken before it was stored.
+  const setMessages: Dispatch<SetStateAction<Message[]>> = useCallback(
+    (action) => {
+      setRawMessages((prev) =>
+        withLiveTurn(
+          typeof action === "function" ? action(prev) : action,
+          attachedTurnRef.current,
+        ),
+      );
+    },
+    [],
+  );
+  useEffect(() => {
+    const sync = () => {
+      const live = getAssistantTurn(viewedChatId);
+      if (live) attachToTurn(live);
     };
+    sync();
+    const unsubscribe = subscribeAssistantTurns((id) => {
+      if (id === viewedChatId) sync();
+    });
+    return () => {
+      unsubscribe();
+      attachToTurn(null);
+    };
+  }, [viewedChatId, attachToTurn]);
 
+  // Invalidate the previous request before a new thread can receive updates.
+  //
+  // Keyed on the thread itself, never on effect lifecycle. StrictMode replays
+  // create/destroy/create on mount without the thread changing, and doing this
+  // in a cleanup aborted a request the host had just started: a first message
+  // auto-sent from a mount effect was killed mid-flight, and because the catch
+  // ignores a superseded request the turn stalled on its empty placeholder with
+  // no error. A layout effect still runs inside the switching commit, so no
+  // async continuation from the old request can land in the new thread first.
+  const threadKey = `${workspaceIdentity}:${projectId ?? ""}:${initialChatId ?? ""}`;
+  // The flow every report from this hook belongs to: the same failure in a
+  // project chat and in the general assistant is two issues, not one.
+  const turnOperation: Operation = projectId ? "project_chat.turn" : "chat.turn";
+  const threadKeyRef = useRef(threadKey);
+  const adoptedThreadKeyRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (threadKeyRef.current === threadKey) return;
+    threadKeyRef.current = threadKey;
+    const isAdoptedThread = adoptedThreadKeyRef.current === threadKey;
+    adoptedThreadKeyRef.current = null;
+    // A new chat receiving its persisted id is still the same live turn.
+    if (isAdoptedThread) return;
+    // Detach — never abort. Aborting closes the socket, which the backend
+    // treats as Stop: it persists a truncated "Cancelled by user." answer in
+    // the thread the user just left. Retiring the generation is enough to
+    // keep the old turn from writing into the new thread; the request itself
+    // runs to completion and the server stores the whole answer.
+    requestGenerationRef.current += 1;
+    abortControllerRef.current = null;
+    registeredTurnRef.current = null;
+    attachToTurn(null);
+    setIsResponseLoading(false);
+    setIsLoadingCitations(false);
+  }, [threadKey, attachToTurn]);
+
+  /**
+   * Stop listening to the turn in flight without cancelling it. For leaving a
+   * thread (switching chats, starting a new one): the request keeps running,
+   * the turn record keeps collecting the answer for whoever views the thread
+   * next, and the server persists the complete answer. Only `cancel` — the
+   * Stop control — aborts the request.
+   */
+  const detach = () => {
+    requestGenerationRef.current += 1;
+    abortControllerRef.current = null;
+    registeredTurnRef.current = null;
+    attachToTurn(null);
+    setIsResponseLoading(false);
+    setIsLoadingCitations(false);
+  };
+
+  /** Stop: this hook's own request, or the detached one streaming into the thread it views. */
+  const cancel = () => {
+    const own = registeredTurnRef.current;
+    if (own) {
+      own.cancel();
+      return;
+    }
+    cancelAssistantTurn(viewedChatId);
+  };
+
+  type ChatTurnOptions = {
+    displayedDoc?: { filename: string; documentId: string } | null;
+    askInputsResponse?: Extract<
+      AssistantEvent,
+      { type: "ask_inputs_response" }
+    >;
     /**
-     * Finalize any in-flight streaming content event and reset the drip
-     * counters so the next content_delta starts a fresh block. Called
-     * before any non-content event is appended, so interleaved content /
-     * reasoning / tool events stay in chronological order — without the
-     * later content block inheriting the earlier block's accumulated text.
+     * Called once the server has accepted the turn, before its answer
+     * streams. From then on a dropped connection resumes the server's copy
+     * rather than re-sending, so the caller can let go of what it sent.
      */
-    const finalizeStreamingContent = () => {
-        stopDrip();
-        const events = eventsRef.current;
-        const last = events[events.length - 1];
-        if (last?.type === "content" && last.isStreaming) {
-            const finalText = dripTargetRef.current;
-            eventsRef.current = [
-                ...events.slice(0, -1),
-                { type: "content", text: finalText },
-            ];
-            const snapshot = [...eventsRef.current];
-            setMessages((prev) => {
-                const updated = [...prev];
-                const lastMsg = updated[updated.length - 1];
-                if (lastMsg?.role === "assistant") {
-                    updated[updated.length - 1] = {
-                        ...lastMsg,
-                        events: snapshot,
-                    };
-                }
-                return updated;
-            });
-        }
-        dripTargetRef.current = "";
-        dripDisplayLenRef.current = 0;
-    };
+    onAccepted?: () => void;
+  };
 
-    // If the model transitions from reasoning into content/tool without a
-    // reasoning_block_end (or the events arrive out of order), the prior
-    // reasoning event would otherwise stay flagged isStreaming forever.
-    const finalizeStreamingReasoning = () => {
-        const events = eventsRef.current;
-        const last = events[events.length - 1];
-        if (last?.type !== "reasoning" || !last.isStreaming) return;
-        eventsRef.current = [
-            ...events.slice(0, -1),
-            { type: "reasoning", text: last.text },
-        ];
-        const snapshot = [...eventsRef.current];
-        setMessages((prev) => {
-            const updated = [...prev];
-            const lastMsg = updated[updated.length - 1];
-            if (lastMsg?.role === "assistant") {
-                updated[updated.length - 1] = {
-                    ...lastMsg,
-                    events: snapshot,
-                };
-            }
-            return updated;
-        });
-    };
+  /**
+   * Everything a re-send needs, captured when the turn is sent. An error
+   * toast with actions never auto-dismisses, so its Retry can fire minutes
+   * later — by then the hook may be showing a different thread, a newer turn
+   * may own the stream, and the chat may have been given an id. The snapshot
+   * (not the raising render's closure, and not a mutable "last turn") is what
+   * the retry replays, and it is validated against the live hook first.
+   */
+  type TurnSnapshot = {
+    /** The request generation this turn owned; a newer one supersedes it. */
+    turnId: number;
+    /** Project + chat the turn was sent from; updated when the id arrives. */
+    threadKey: string;
+    /** The chat id the turn ended up in, once the stream assigns one. */
+    chatId: string | undefined;
+    message: Message;
+    opts?: ChatTurnOptions;
+    /** Messages on screen when the turn was sent, minus its own answer. */
+    transcriptLength: number;
+    /**
+     * The user bubble this turn answers: normally the message itself, or —
+     * for an ask-inputs continuation, whose answer is rendered as an event
+     * rather than a bubble — the question already on screen.
+     */
+    anchorContent: string;
+    /**
+     * Set when the connection broke after the server had named the turn.
+     * The server owns that run: it is still generating, or has stored the
+     * answer. Retry re-reads the thread rather than re-sending the question,
+     * which would store it twice (and, while the run is alive, be refused
+     * with 409 turn_in_progress after that insert).
+     */
+    recoveryChatId?: string;
+  };
 
-    const startDrip = () => {
-        if (dripIntervalRef.current !== null) return;
-        dripIntervalRef.current = setInterval(() => {
-            const target = dripTargetRef.current;
-            const displayLen = dripDisplayLenRef.current;
-            if (displayLen >= target.length) {
-                stopDrip();
-                return;
-            }
+  const threadKeyFor = (id: string | undefined) =>
+    `${workspaceIdentity}:${projectId ?? ""}:${id ?? "new"}`;
 
-            const newLen = Math.min(
-                displayLen + DRIP_CHARS_PER_TICK,
-                target.length,
-            );
-            dripDisplayLenRef.current = newLen;
-            const visibleText = target.slice(0, newLen);
-            const events = eventsRef.current;
-            const lastIdx = events.length - 1;
-            const last = events[lastIdx];
-            if (last?.type === "content" && last.isStreaming) {
-                const next = events.slice();
-                next[lastIdx] = {
-                    type: "content",
-                    text: visibleText,
-                    isStreaming: true,
-                };
-                eventsRef.current = next;
-            }
+  const lastUserMessage = (transcript: Message[]): Message | undefined => {
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      if (transcript[i].role === "user") return transcript[i];
+    }
+    return undefined;
+  };
 
-            setMessages((prev) =>
-                updateLastContentEvent(prev, visibleText, true),
-            );
+  /**
+   * Re-send one specific turn. Refuses — visibly, but without touching the
+   * transcript or an in-flight stream — when the hook has moved on from the
+   * turn the toast was raised for.
+   */
+  const retryTurn = async (turn: TurnSnapshot): Promise<string | null> => {
+    if (!mountedRef.current) {
+      notifyInfo("Open this chat and wait for its current answer before retrying.");
+      return null;
+    }
+    const transcript = messagesRef.current;
+    const anchor = lastUserMessage(transcript);
+    // The host swaps threads by writing straight through the setters, so the
+    // hook can be showing another chat entirely by the time this fires.
+    if (turn.threadKey !== threadKeyFor(chatIdRef.current)) {
+      notifyInfo(CHAT_CHANGED_MESSAGE);
+      return null;
+    }
+    if (turn.turnId !== requestGenerationRef.current) {
+      // A newer turn owns the thread. Re-sending would abort a healthy
+      // stream and answer a question the user has already moved past.
+      notifyInfo(
+        "A newer message has replaced this one. Send it again if you still need an answer.",
+      );
+      return null;
+    }
+    if (
+      transcript.length < turn.transcriptLength ||
+      !anchor ||
+      anchor.content !== turn.anchorContent
+    ) {
+      // Same chat id, different transcript: the thread was reloaded or
+      // rewritten under the toast.
+      notifyInfo(CHAT_CHANGED_MESSAGE);
+      return null;
+    }
+    if (hasAssistantTurn(chatIdRef.current)) {
+      notifyInfo("Wait for this chat's current answer before retrying.");
+      return null;
+    }
+    if (turn.recoveryChatId) return recoverServerTurn(turn, turn.recoveryChatId);
+    // Drop the failed assistant bubble before re-sending, or the retry would
+    // stack a second empty turn under it and repeat the user's question in
+    // the request. `messagesRef` is updated here too so `handleChat` reads
+    // the trimmed list without waiting for a React commit. The finished turn
+    // record is detached first, or `setMessages` would lay the failed answer
+    // back over the trimmed list.
+    const trimmed = [...transcript];
+    while (
+      trimmed.length > 0 &&
+      trimmed[trimmed.length - 1].role === "assistant"
+    ) {
+      trimmed.pop();
+    }
+    attachToTurn(null);
+    messagesRef.current = trimmed;
+    setMessages(trimmed);
+    return handleChat(turn.message, turn.opts);
+  };
 
-            if (newLen >= target.length) {
-                stopDrip();
-            }
-        }, 16);
-    };
-
-    useEffect(() => {
-        return () => stopDrip();
-    }, []);
-
-    const cancel = () => {
-        if (abortControllerRef.current) {
-            abortControllerRef.current.abort();
-            abortControllerRef.current = null;
-            setIsResponseLoading(false);
-            setIsLoadingCitations(false);
-        }
-    };
-
-    // Transient placeholder events (tool_call_start, thinking) fill the
-    // latency gap between real SSE events so the wrapper doesn't look stuck.
-    // Anytime a real event arrives, drop any streaming placeholder first.
-    const isStreamingPlaceholder = (e: AssistantEvent) =>
-        (e.type === "tool_call_start" || e.type === "thinking") &&
-        !!e.isStreaming;
-
-    const clearStreamingPlaceholders = () => {
-        const before = eventsRef.current;
-        const after = before.filter((e) => !isStreamingPlaceholder(e));
-        if (after.length === before.length) return;
-        eventsRef.current = after;
-        const snapshot = [...after];
-        setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-                updated[updated.length - 1] = { ...last, events: snapshot };
-            }
-            return updated;
-        });
-    };
-
-    const pushThinkingPlaceholder = () => {
-        const events = eventsRef.current;
-        const last = events[events.length - 1];
-        // Don't stack placeholders back-to-back; one "Thinking…" line is plenty.
-        if (last && isStreamingPlaceholder(last)) return;
-        eventsRef.current = [
-            ...events,
-            { type: "thinking" as const, isStreaming: true },
-        ];
-        const snapshot = [...eventsRef.current];
-        setMessages((prev) => {
-            const updated = [...prev];
-            const lastMsg = updated[updated.length - 1];
-            if (lastMsg?.role === "assistant") {
-                updated[updated.length - 1] = { ...lastMsg, events: snapshot };
-            }
-            return updated;
-        });
-    };
-
-    const pushEvent = (event: AssistantEvent) => {
-        finalizeStreamingContent();
-        finalizeStreamingReasoning();
-        // A real event, or a more specific placeholder such as
-        // tool_call_start, should replace any generic "Thinking..." line.
-        const next = eventsRef.current.filter(
-            (e) => !isStreamingPlaceholder(e),
-        );
-        eventsRef.current = [...next, event];
-        const snapshot = [...eventsRef.current];
-        setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-                updated[updated.length - 1] = { ...last, events: snapshot };
-            }
-            return updated;
-        });
-    };
-
-    const updateMatchingEvent = (
-        predicate: (e: AssistantEvent) => boolean,
-        updater: (e: AssistantEvent) => AssistantEvent,
-    ) => {
-        const events = eventsRef.current;
-        const idx = [...events]
-            .map((_, i) => i)
-            .reverse()
-            .find((i) => predicate(events[i]));
-        if (idx === undefined) return;
-        const newEvents = [...events];
-        newEvents[idx] = updater(events[idx]);
-        eventsRef.current = newEvents;
-        const snapshot = [...newEvents];
-        setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-                updated[updated.length - 1] = { ...last, events: snapshot };
-            }
-            return updated;
-        });
-    };
-
-    const handleChat = async (
-        message: MikeMessage,
-        opts?: {
-            displayedDoc?: { filename: string; documentId: string } | null;
+  /**
+   * Retry for a turn the server already owns: show the server's copy of the
+   * thread. `loadAssistantChat` re-attaches to the run if it is still
+   * generating (the hook then mirrors it like any resumed turn) and otherwise
+   * returns the stored answer. Reading is idempotent, so a second click
+   * cannot double anything.
+   */
+  const recoverServerTurn = async (
+    turn: TurnSnapshot,
+    serverChatId: string,
+  ): Promise<string | null> => {
+    attachToTurn(null);
+    try {
+      const loaded = await loadAssistantChat(serverChatId);
+      // Same staleness rules as a re-send: never repaint a thread the user
+      // has since left or sent into.
+      if (
+        !mountedRef.current ||
+        turn.turnId !== requestGenerationRef.current ||
+        chatIdRef.current !== serverChatId
+      ) {
+        return null;
+      }
+      setMessages(loaded.messages);
+      return serverChatId;
+    } catch (error) {
+      notifyError(error, {
+        action: "load this chat",
+        dedupeKey: "assistant-chat",
+          support: true,
+        onRetry: async () => {
+          await retryTurn(turn);
         },
-    ): Promise<string | null> => {
-        if (!message.content.trim()) return null;
+      });
+      return null;
+    }
+  };
 
-        setIsResponseLoading(true);
+  const handleChat = async (
+    message: Message,
+    opts?: ChatTurnOptions,
+  ): Promise<string | null> => {
+    if (!mountedRef.current || workspaceIdentityRef.current !== workspaceIdentity || !message.content.trim() || hasAssistantTurn(chatIdRef.current)) return null;
 
-        const lastMessage = messages[messages.length - 1];
-        const isMessageAlreadyAdded =
-            lastMessage &&
-            lastMessage.role === "user" &&
-            lastMessage.content === message.content;
+    setIsResponseLoading(true);
 
-        const newMessages: MikeMessage[] = isMessageAlreadyAdded
-            ? messages
-            : [...messages, message];
+    // The committed list, or the one a retry just trimmed.
+    const currentMessages = messagesRef.current;
+    const lastMessage = currentMessages[currentMessages.length - 1];
+    const isMessageAlreadyAdded =
+      lastMessage &&
+      lastMessage.role === "user" &&
+      lastMessage.content === message.content;
 
-        setMessages([
-            ...newMessages,
-            { role: "assistant", content: "", annotations: [], events: [] },
-        ]);
+    const apiMessagesForTurn: Message[] = isMessageAlreadyAdded
+      ? currentMessages
+      : [...currentMessages, message];
+    const askInputsResponseEvent = opts?.askInputsResponse ?? null;
+    const optimisticResponseEvent = askInputsResponseEvent;
+    const userInputThinkingEvent = optimisticResponseEvent
+      ? ({
+          type: "thinking" as const,
+          isStreaming: true,
+        } satisfies AssistantEvent)
+      : null;
+    const displayMessages: Message[] = optimisticResponseEvent
+      ? (() => {
+          const updated = currentMessages.map((item) => ({
+            ...item,
+            events: item.events ? [...item.events] : item.events,
+          }));
+          for (let i = updated.length - 1; i >= 0; i--) {
+            const current = updated[i];
+            if (current.role !== "assistant") continue;
+            updated[i] = {
+              ...current,
+              events: [
+                ...(current.events ?? []),
+                optimisticResponseEvent,
+                ...(userInputThinkingEvent ? [userInputThinkingEvent] : []),
+              ],
+            };
+            return updated;
+          }
+          return updated;
+        })()
+      : apiMessagesForTurn;
 
-        let streamedChatId: string | null = null;
+    // An ask-inputs answer continues the assistant message that asked;
+    // anything else starts a fresh one.
+    const continuedAssistant = optimisticResponseEvent
+      ? ([...displayMessages]
+          .reverse()
+          .find((item) => item.role === "assistant") ?? null)
+      : null;
+    const assistantPlaceholder: Message = continuedAssistant ?? {
+      role: "assistant",
+      content: "",
+      citations: [],
+      events: [],
+    };
+    setRawMessages(
+      optimisticResponseEvent
+        ? displayMessages
+        : [...displayMessages, assistantPlaceholder],
+    );
 
-        stopDrip();
-        dripTargetRef.current = "";
-        dripDisplayLenRef.current = 0;
-        eventsRef.current = [];
-
-        try {
-            const controller = new AbortController();
-            abortControllerRef.current = controller;
-
-            const apiMessages = newMessages.map((currentMessage) => ({
-                role: currentMessage.role,
-                content: currentMessage.content,
-                files: currentMessage.files,
-                workflow: currentMessage.workflow,
-            }));
-
-            const model = message.model;
-
-            const displayedDoc = opts?.displayedDoc ?? null;
-
-            // Pull the user's attachments from the just-submitted message.
-            // These are the files dragged into / picked from the chat input
-            // for this turn (separate from the running history of past
-            // attachments). Sent as a request-level field so the backend
-            // can call them out specifically in the system prompt.
-            const attachedDocs = (
-                message.files?.filter((f) => !!f.document_id) ?? []
-            ).map((f) => ({
-                filename: f.filename,
-                document_id: f.document_id as string,
-            }));
-
-            const response = await (projectId
-                ? streamProjectChat({
-                      projectId,
-                      messages: apiMessages,
-                      chat_id: chatId,
-                      model,
-                      displayed_doc: displayedDoc
-                          ? {
-                                filename: displayedDoc.filename,
-                                document_id: displayedDoc.documentId,
-                            }
-                          : undefined,
-                      attached_documents:
-                          attachedDocs.length > 0 ? attachedDocs : undefined,
-                      signal: controller.signal,
-                  })
-                : streamChat({
-                      messages: apiMessages,
-                      chat_id: chatId,
-                      model,
-                      signal: controller.signal,
-                  }));
-
-            if (!response.ok) {
-                const errText = await response.text();
-                throw new Error(`HTTP ${response.status}: ${errText}`);
-            }
-
-            const reader = response.body?.getReader();
-            if (!reader) throw new Error("No response body");
-
-            const decoder = new TextDecoder();
-            let buffer = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split("\n");
-                buffer = lines.pop() || "";
-
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (!trimmed || !trimmed.startsWith("data:")) continue;
-
-                    const dataStr = trimmed.slice(5).trim();
-                    if (dataStr === "[DONE]") continue;
-
-                    try {
-                        const data = JSON.parse(dataStr);
-
-                        if (data.type === "chat_id") {
-                            streamedChatId = data.chatId;
-                            setChatId(data.chatId);
-                            setCurrentChatId(data.chatId);
-                            continue;
-                        }
-
-                        if (data.type === "content_done") {
-                            setIsLoadingCitations(true);
-                            continue;
-                        }
-
-                        if (data.type === "content_delta") {
-                            const text = data.text as string;
-
-                            // Real content is streaming — retire any
-                            // "Thinking…" / "Running…" placeholders, and
-                            // finalize any in-flight reasoning block so it
-                            // doesn't get stuck rendering as streaming.
-                            clearStreamingPlaceholders();
-                            finalizeStreamingReasoning();
-
-                            // Ensure a streaming content event exists. If
-                            // the last event isn't already a streaming
-                            // content block, start a fresh one — and reset
-                            // the drip so we don't inherit a previous
-                            // block's accumulated text.
-                            const events = eventsRef.current;
-                            const lastEvent = events[events.length - 1];
-                            if (
-                                lastEvent?.type !== "content" ||
-                                !lastEvent.isStreaming
-                            ) {
-                                dripTargetRef.current = text;
-                                dripDisplayLenRef.current = 0;
-                                eventsRef.current = [
-                                    ...events,
-                                    {
-                                        type: "content" as const,
-                                        text: "",
-                                        isStreaming: true,
-                                    },
-                                ];
-                                const snapshot = [...eventsRef.current];
-                                setMessages((prev) => {
-                                    const updated = [...prev];
-                                    const last = updated[updated.length - 1];
-                                    if (last?.role === "assistant") {
-                                        updated[updated.length - 1] = {
-                                            ...last,
-                                            events: snapshot,
-                                        };
-                                    }
-                                    return updated;
-                                });
-                            } else {
-                                dripTargetRef.current += text;
-                            }
-
-                            startDrip();
-                            continue;
-                        }
-
-                        if (data.type === "reasoning_delta") {
-                            const text = data.text as string;
-                            let events = eventsRef.current;
-                            const last = events[events.length - 1];
-                            if (
-                                last?.type === "reasoning" &&
-                                last.isStreaming
-                            ) {
-                                eventsRef.current = [
-                                    ...events.slice(0, -1),
-                                    {
-                                        type: "reasoning" as const,
-                                        text: last.text + text,
-                                        isStreaming: true,
-                                    },
-                                ];
-                            } else {
-                                // New reasoning block — finalize any in-flight
-                                // content event first so the next content_delta
-                                // starts a fresh block at the correct position.
-                                finalizeStreamingContent();
-                                clearStreamingPlaceholders();
-                                events = eventsRef.current;
-                                eventsRef.current = [
-                                    ...events,
-                                    {
-                                        type: "reasoning" as const,
-                                        text,
-                                        isStreaming: true,
-                                    },
-                                ];
-                            }
-                            const snapshot = [...eventsRef.current];
-                            setMessages((prev) => {
-                                const updated = [...prev];
-                                const last = updated[updated.length - 1];
-                                if (last?.role === "assistant") {
-                                    updated[updated.length - 1] = {
-                                        ...last,
-                                        events: snapshot,
-                                    };
-                                }
-                                return updated;
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "reasoning_block_end") {
-                            const events = eventsRef.current;
-                            const last = events[events.length - 1];
-                            if (
-                                last?.type === "reasoning" &&
-                                last.isStreaming
-                            ) {
-                                eventsRef.current = [
-                                    ...events.slice(0, -1),
-                                    {
-                                        type: "reasoning" as const,
-                                        text: last.text,
-                                    },
-                                ];
-                            }
-                            const snapshot = [...eventsRef.current];
-                            setMessages((prev) => {
-                                const updated = [...prev];
-                                const last = updated[updated.length - 1];
-                                if (last?.role === "assistant") {
-                                    updated[updated.length - 1] = {
-                                        ...last,
-                                        events: snapshot,
-                                    };
-                                }
-                                return updated;
-                            });
-                            pushThinkingPlaceholder();
-                            continue;
-                        }
-
-                        if (data.type === "tool_call_start") {
-                            // Transient placeholder so the client immediately
-                            // shows activity after Claude ends a turn with
-                            // tool_use. Replaced by the real tool event
-                            // (doc_edited_start, doc_read_start, …) if one
-                            // arrives; otherwise it lingers as a "Working…"
-                            // indicator until the next iteration streams.
-                            pushEvent({
-                                type: "tool_call_start",
-                                name: (data.name as string) ?? "",
-                                isStreaming: true,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "workflow_applied") {
-                            pushEvent({
-                                type: "workflow_applied",
-                                workflow_id: data.workflow_id as string,
-                                title: data.title as string,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_read_start") {
-                            pushEvent({
-                                type: "doc_read",
-                                filename: data.filename as string,
-                                isStreaming: true,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_read") {
-                            updateMatchingEvent(
-                                (e) =>
-                                    e.type === "doc_read" &&
-                                    e.filename === data.filename &&
-                                    !!e.isStreaming,
-                                (e) => ({ ...e, isStreaming: false }),
-                            );
-                            pushThinkingPlaceholder();
-                            continue;
-                        }
-
-                        if (data.type === "doc_find_start") {
-                            pushEvent({
-                                type: "doc_find",
-                                filename: data.filename as string,
-                                query: (data.query as string) ?? "",
-                                total_matches: 0,
-                                isStreaming: true,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_find") {
-                            updateMatchingEvent(
-                                (e) =>
-                                    e.type === "doc_find" &&
-                                    e.filename === data.filename &&
-                                    e.query === (data.query as string) &&
-                                    !!e.isStreaming,
-                                (e) => ({
-                                    ...e,
-                                    isStreaming: false,
-                                    total_matches:
-                                        typeof data.total_matches === "number"
-                                            ? (data.total_matches as number)
-                                            : (
-                                                  e as {
-                                                      type: "doc_find";
-                                                      total_matches: number;
-                                                  }
-                                              ).total_matches,
-                                }),
-                            );
-                            pushThinkingPlaceholder();
-                            continue;
-                        }
-
-                        if (data.type === "doc_created_start") {
-                            pushEvent({
-                                type: "doc_created",
-                                filename: data.filename as string,
-                                download_url: "",
-                                isStreaming: true,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_download") {
-                            pushEvent({
-                                type: "doc_download",
-                                filename: data.filename as string,
-                                download_url: data.download_url as string,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_created") {
-                            updateMatchingEvent(
-                                (e) =>
-                                    e.type === "doc_created" &&
-                                    e.filename === data.filename &&
-                                    !!e.isStreaming,
-                                (e) => {
-                                    const next: Extract<
-                                        AssistantEvent,
-                                        { type: "doc_created" }
-                                    > = {
-                                        type: "doc_created",
-                                        filename: (e as { filename: string })
-                                            .filename,
-                                        download_url:
-                                            data.download_url as string,
-                                        isStreaming: false,
-                                    };
-                                    if (typeof data.document_id === "string") {
-                                        next.document_id =
-                                            data.document_id as string;
-                                    }
-                                    if (typeof data.version_id === "string") {
-                                        next.version_id =
-                                            data.version_id as string;
-                                    }
-                                    if (
-                                        typeof data.version_number === "number"
-                                    ) {
-                                        next.version_number =
-                                            data.version_number as number;
-                                    }
-                                    return next;
-                                },
-                            );
-                            pushThinkingPlaceholder();
-                            continue;
-                        }
-
-                        if (data.type === "doc_replicate_start") {
-                            pushEvent({
-                                type: "doc_replicated",
-                                filename: data.filename as string,
-                                count:
-                                    typeof data.count === "number"
-                                        ? (data.count as number)
-                                        : 1,
-                                isStreaming: true,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_replicated") {
-                            updateMatchingEvent(
-                                (e) =>
-                                    e.type === "doc_replicated" &&
-                                    e.filename === data.filename &&
-                                    !!e.isStreaming,
-                                () => ({
-                                    type: "doc_replicated",
-                                    filename: data.filename as string,
-                                    count:
-                                        typeof data.count === "number"
-                                            ? (data.count as number)
-                                            : Array.isArray(data.copies)
-                                              ? (data.copies as unknown[])
-                                                    .length
-                                              : 1,
-                                    copies: Array.isArray(data.copies)
-                                        ? (data.copies as {
-                                              new_filename: string;
-                                              document_id: string;
-                                              version_id: string;
-                                          }[])
-                                        : undefined,
-                                    error:
-                                        typeof data.error === "string"
-                                            ? (data.error as string)
-                                            : undefined,
-                                    isStreaming: false,
-                                }),
-                            );
-                            pushThinkingPlaceholder();
-                            continue;
-                        }
-
-                        if (data.type === "doc_edited_start") {
-                            pushEvent({
-                                type: "doc_edited",
-                                filename: data.filename as string,
-                                document_id: "",
-                                version_id: "",
-                                download_url: "",
-                                annotations: [],
-                                isStreaming: true,
-                            });
-                            continue;
-                        }
-
-                        if (data.type === "doc_edited") {
-                            updateMatchingEvent(
-                                (e) =>
-                                    e.type === "doc_edited" &&
-                                    e.filename === data.filename &&
-                                    !!e.isStreaming,
-                                () => ({
-                                    type: "doc_edited",
-                                    filename: data.filename as string,
-                                    document_id:
-                                        (data.document_id as string) ?? "",
-                                    version_id:
-                                        (data.version_id as string) ?? "",
-                                    version_number:
-                                        typeof data.version_number === "number"
-                                            ? (data.version_number as number)
-                                            : null,
-                                    download_url:
-                                        (data.download_url as string) ?? "",
-                                    annotations: Array.isArray(data.annotations)
-                                        ? (data.annotations as import("@/app/components/shared/types").MikeEditAnnotation[])
-                                        : [],
-                                    error:
-                                        typeof data.error === "string"
-                                            ? (data.error as string)
-                                            : undefined,
-                                    isStreaming: false,
-                                }),
-                            );
-                            pushThinkingPlaceholder();
-                            continue;
-                        }
-
-                        if (data.type === "citations") {
-                            // End-of-stream signal — scrub any lingering
-                            // placeholders so they don't persist into the
-                            // finalised message.
-                            clearStreamingPlaceholders();
-                            const incoming = (data.citations ??
-                                []) as MikeCitationAnnotation[];
-                            setMessages((prev) => {
-                                const updated = [...prev];
-                                const last = updated[updated.length - 1];
-                                if (last?.role === "assistant") {
-                                    updated[updated.length - 1] = {
-                                        ...last,
-                                        annotations: incoming,
-                                    };
-                                }
-                                return updated;
-                            });
-                            continue;
-                        }
-                    } catch (e) {
-                        console.warn(
-                            "[useAssistantChat] failed to parse SSE line:",
-                            trimmed,
-                            e,
-                        );
-                    }
-                }
-            }
-
-            flushDrip();
-            finalizeStreamingReasoning();
-            setIsResponseLoading(false);
-            setIsLoadingCitations(false);
-
-            const finalChatId = streamedChatId || chatId || null;
-            if (finalChatId && finalChatId !== chatId) {
-                if (chatId) {
-                    replaceChatId(
-                        chatId,
-                        finalChatId,
-                        message.content.trim().slice(0, 120) || "New Chat",
-                    );
-                }
-                setCurrentChatId(finalChatId);
-                const chatBasePath = projectId
-                    ? `/projects/${projectId}/assistant/chat`
-                    : `/assistant/chat`;
-                router.replace(`${chatBasePath}/${finalChatId}`);
-            }
-
-            await loadChats();
-
-            const finalChatIdForTitle = streamedChatId || chatId || null;
-            if (finalChatIdForTitle && newMessages.length === 1) {
-                const titleParts = [message.content];
-                if (message.workflow)
-                    titleParts.push(`Workflow: ${message.workflow.title}`);
-                if (message.files?.length)
-                    titleParts.push(
-                        `Files: ${message.files.map((f) => f.filename).join(", ")}`,
-                    );
-                void generateTitle(finalChatIdForTitle, titleParts.join("\n"));
-            }
-
-            return streamedChatId || null;
-        } catch (error: unknown) {
-            if (error instanceof Error && error.name === "AbortError") {
-                flushDrip();
-                setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role === "assistant") {
-                        const updated = [...prev];
-                        const events = last.events ?? [];
-                        const idx = findLastContentIndex(events);
-                        const cancelText = "Cancelled by user";
-                        if (idx >= 0) {
-                            const newEvents = [...events];
-                            const existing = newEvents[idx] as {
-                                type: "content";
-                                text: string;
-                            };
-                            newEvents[idx] = {
-                                type: "content",
-                                text: existing.text
-                                    ? `${existing.text}\n\nCancelled by user`
-                                    : cancelText,
-                            };
-                            updated[updated.length - 1] = {
-                                ...last,
-                                events: newEvents,
-                            };
-                        } else {
-                            updated[updated.length - 1] = {
-                                ...last,
-                                events: [
-                                    ...events,
-                                    { type: "content", text: cancelText },
-                                ],
-                            };
-                        }
-                        return updated;
-                    }
-                    return [
-                        ...prev,
-                        {
-                            role: "assistant",
-                            content: "",
-                            events: [
-                                { type: "content", text: "Cancelled by user" },
-                            ],
-                        },
-                    ];
-                });
-            } else {
-                stopDrip();
-                const errorMessage =
-                    error instanceof Error && error.message
-                        ? error.message
-                        : "Sorry, something went wrong.";
-                setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.role === "assistant") {
-                        const updated = [...prev];
-                        updated[updated.length - 1] = {
-                            ...last,
-                            error: errorMessage,
-                        };
-                        return updated;
-                    }
-                    return [
-                        ...prev,
-                        {
-                            role: "assistant",
-                            content: "",
-                            error: errorMessage,
-                        },
-                    ];
-                });
-            }
-
-            setIsResponseLoading(false);
-            setIsLoadingCitations(false);
-            return null;
-        } finally {
-            abortControllerRef.current = null;
+    const generation = ++requestGenerationRef.current;
+    const retrySnapshot: TurnSnapshot = {
+      turnId: generation,
+      threadKey: threadKeyFor(chatIdRef.current),
+      chatId: chatIdRef.current,
+      message,
+      // A retry is a new send; the original caller has already moved on.
+      opts: opts && { ...opts, onAccepted: undefined },
+      transcriptLength: optimisticResponseEvent
+        ? displayMessages.length
+        : apiMessagesForTurn.length,
+      anchorContent:
+        lastUserMessage(
+          optimisticResponseEvent ? displayMessages : apiMessagesForTurn,
+        )?.content ?? message.content,
+    };
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const isCurrentRequest = () =>
+      mountedRef.current && workspaceIdentityRef.current === workspaceIdentity && requestGenerationRef.current === generation;
+    // The live id, never the render-time state this closure captured: a turn
+    // re-sent from a toast must land in the chat the first attempt created,
+    // not open a second one.
+    const sendChatId = chatIdRef.current;
+    const cursor = createTurnCursor(sendChatId);
+    // From here the turn record owns the assistant message; this hook, like
+    // any hook that comes back to the thread, renders it by attaching.
+    const turn = beginAssistantTurn(sendChatId, {
+      userMessage: optimisticResponseEvent ? null : message,
+      assistant: assistantPlaceholder,
+      cancel: () => {
+        // The server keeps generating until it is told otherwise: closing
+        // this connection only detaches. Name the turn to the Stop endpoint
+        // first, then stop reading. Before the first frame the turn has no
+        // name yet; the server then finishes the answer on its own and
+        // stores it whole, which a reload shows.
+        if (cursor.chatId && cursor.turnId) {
+          void stopChatTurn(cursor.chatId, cursor.turnId).catch(() => {});
         }
-    };
-
-    const handleNewChat = async (
-        message: MikeMessage,
-        projectId?: string,
-    ): Promise<string | null> => {
-        if (!message.content.trim()) return null;
-
-        setMessages([message]);
-        setNewChatMessages([message]);
-
-        const newChatId = await saveChat(projectId);
-        if (newChatId) {
-            setChatId(newChatId);
-            setCurrentChatId(newChatId);
+        controller.abort();
+        sink.appendCancellation();
+        turn.finish();
+        if (isCurrentRequest()) {
+          setIsResponseLoading(false);
+          setIsLoadingCitations(false);
         }
+      },
+    });
+    const sink = createTurnEventSink(turn, assistantPlaceholder.events ?? []);
+    registeredTurnRef.current = turn;
+    attachToTurn(turn.turn);
+    let streamedChatId: string | null = null;
 
-        return newChatId;
-    };
+    try {
+      const apiMessages = apiMessagesForTurn.map((currentMessage) => ({
+        role: currentMessage.role,
+        content:
+          currentMessage.role === "assistant"
+            ? assistantHistoryContent(currentMessage)
+            : currentMessage.content,
+        files: currentMessage.files,
+        workflow: currentMessage.workflow,
+        playbook: currentMessage.playbook,
+      }));
 
-    return {
-        messages,
-        isResponseLoading,
-        setIsResponseLoading,
-        isLoadingCitations,
-        handleChat,
-        handleNewChat,
-        setMessages,
-        cancel,
-        chatId,
-    };
+      const model = message.model;
+      const reasoning = message.reasoning;
+
+      const displayedDoc = opts?.displayedDoc ?? null;
+
+      // Pull the user's attachments from the just-submitted message.
+      // These are the files dragged into / picked from the chat input
+      // for this turn (separate from the running history of past
+      // attachments). Sent as a request-level field so the backend
+      // can call them out specifically in the system prompt.
+      const attachedDocs = (
+        message.files?.filter((f) => !!f.document_id) ?? []
+      ).map((f) => ({
+        filename: f.filename,
+        document_id: f.document_id as string,
+      }));
+
+      const openTurn = () =>
+        projectId
+          ? streamProjectChat({
+              projectId,
+              messages: apiMessages,
+              chat_id: sendChatId,
+              model,
+              reasoning,
+              displayed_doc: displayedDoc
+                ? {
+                    filename: displayedDoc.filename,
+                    document_id: displayedDoc.documentId,
+                  }
+                : undefined,
+              attached_documents:
+                attachedDocs.length > 0 ? attachedDocs : undefined,
+              ask_inputs_response: opts?.askInputsResponse,
+              signal: controller.signal,
+            })
+          : streamChat({
+              messages: apiMessages,
+              chat_id: sendChatId,
+              // Where a new chat is filed: the workspace it is started in.
+              org_id: workspaceOrgId,
+              model,
+              reasoning,
+              ask_inputs_response: opts?.askInputsResponse,
+              signal: controller.signal,
+            });
+      // The frames go to the turn record (lib/assistantTurnStream), which
+      // every hook viewing the thread mirrors. Only this hook's own state
+      // and navigation are gated on the request still being its own; a
+      // dropped connection is resumed from the server's copy of the turn.
+      await readAssistantTurn({
+        open: async () => {
+          const response = await openTurn();
+          if (response.ok) opts?.onAccepted?.();
+          return response;
+        },
+        turn,
+        sink,
+        cursor,
+        signal: controller.signal,
+        hooks: {
+          onChatId: (streamed) => {
+            const isNewChatId =
+              streamed !== sendChatId && streamed !== streamedChatId;
+            streamedChatId = streamed;
+            if (!isCurrentRequest()) return;
+            chatIdRef.current = streamed;
+            // Keep this turn's snapshot on the chat it actually landed in,
+            // so its Retry re-sends into that chat instead of creating one.
+            retrySnapshot.chatId = streamed;
+            retrySnapshot.threadKey = threadKeyFor(streamed);
+            setChatId(streamed);
+            setCurrentChatId(streamed);
+            if (isNewChatId && onChatCreated) {
+              adoptedThreadKeyRef.current = `${workspaceIdentity}:${projectId ?? ""}:${streamed}`;
+              onChatCreated(streamed);
+            }
+          },
+          onChatTitle: (id, title) => updateChatTitle(id, title),
+          // A rejected key cannot be fixed by retrying, so raise it as a
+          // signal the surface can turn into "go fix your key" rather than
+          // leaving it as one more line of failed-response text.
+          onRejectedApiKey: () => {
+            if (isCurrentRequest()) setRejectedApiKey({ model: model ?? null });
+          },
+          onErrorFrame: ({ message: frameMessage, safeToDisplay, code, requestId, reportingOwner }) => {
+            // The bubble records that this turn failed; the toast is where
+            // the user gets a way back. A server-side failure is one the
+            // user cannot fix, so Contact support rides along with Retry.
+            //
+            // A `safe_to_display` frame is a configuration refusal (no API
+            // key, a model this deployment disallows): re-sending it would
+            // fail identically, so it gets support without a Retry.
+            notifyError(
+              errorFrameFailure(frameMessage, safeToDisplay, { code, requestId, reportingOwner }),
+              {
+                action: "get a response",
+                operation: turnOperation,
+                dedupeKey: "assistant-chat",
+          support: true,
+                onRetry: async () => {
+                  await retryTurn(retrySnapshot);
+                },
+              },
+            );
+            if (isCurrentRequest()) setIsResponseLoading(false);
+          },
+        },
+      });
+
+      if (!isCurrentRequest()) return null;
+
+      setIsResponseLoading(false);
+      setIsLoadingCitations(false);
+
+      const finalChatId = streamedChatId || sendChatId || null;
+      if (finalChatId && finalChatId !== sendChatId) {
+        if (sendChatId) {
+          replaceChatId(
+            sendChatId,
+            finalChatId,
+            message.content.trim().slice(0, 120) || "New Chat",
+          );
+        }
+        setCurrentChatId(finalChatId);
+        if (!onChatCreated) {
+          const chatBasePath = projectId
+            ? `/projects/${projectId}/assistant/chat`
+            : `/assistant/chat`;
+          router.replace(`${chatBasePath}/${finalChatId}`);
+        }
+      }
+
+      await loadChats();
+
+      return streamedChatId || null;
+    } catch (error: unknown) {
+      // The record learns of the failure even when this hook no longer
+      // renders the thread: a reader attached to the turn must see the
+      // error, not a spinner.
+      sink.finalizeStreamingContent();
+      if (controller.signal.aborted || isAbortError(error)) {
+        sink.finalizeStreamingReasoning();
+        sink.appendCancellation();
+      } else {
+        // The stream broke for a reason other than the user stopping it:
+        // the user sees a generic message, Sentry gets the real one.
+        reportError(error, {
+          tags: {
+            component: "assistant-chat",
+            operation: turnOperation,
+            project: Boolean(projectId),
+          },
+        });
+        sink.endStreamingAfterFailure();
+        if (cursor.chatId && cursor.turnId) {
+          retrySnapshot.recoveryChatId = cursor.chatId;
+        }
+        const described = describeError(error, {
+          action: "get a response",
+          fallback: TURN_FAILED_MESSAGE,
+        });
+        const uncertain = isUncertainDelivery(
+          error,
+          Boolean(retrySnapshot.recoveryChatId),
+        );
+        const failure = uncertain ? uncertainDeliveryError(error) : error;
+        if (uncertain && retrySnapshot.chatId) {
+          retrySnapshot.recoveryChatId = retrySnapshot.chatId;
+        }
+        turn.update((assistantMessage) => ({
+          ...assistantMessage,
+          error: uncertain ? (failure as UserVisibleError).message : described.message,
+        }));
+        notifyError(failure, {
+          action: "get a response",
+          operation: turnOperation,
+          fallback: TURN_FAILED_MESSAGE,
+          dedupeKey: "assistant-chat",
+          support: true,
+          onRetry: uncertain ? undefined : async () => { await retryTurn(retrySnapshot); },
+          actions: uncertain ? [{
+            label: checkHistoryLabel(Boolean(retrySnapshot.chatId)),
+            onClick: async () => {
+              if (retrySnapshot.chatId) await retryTurn(retrySnapshot);
+              else await loadChats();
+            },
+          }] : undefined,
+        });
+      }
+
+      if (!isCurrentRequest()) return null;
+      setIsResponseLoading(false);
+      setIsLoadingCitations(false);
+      return null;
+    } finally {
+      turn.finish();
+      if (registeredTurnRef.current === turn) registeredTurnRef.current = null;
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
+    }
+  };
+
+  const handleNewChat = async (
+    message: Message,
+    projectId?: string,
+  ): Promise<string | null> => {
+    if (!message.content.trim()) return null;
+
+    setRawMessages([message]);
+    setNewChatMessages([message]);
+
+    const newChatId = await saveChat(projectId);
+    if (newChatId) {
+      chatIdRef.current = newChatId;
+      setChatId(newChatId);
+      setCurrentChatId(newChatId);
+    }
+
+    return newChatId;
+  };
+
+  return {
+    messages,
+    /**
+     * Set when a provider rejected our API key on the last send. `model` is
+     * the model we asked for, or null when the send carried none. Retrying
+     * cannot help, so surfaces use this to point at the key instead.
+     */
+    rejectedApiKey,
+    dismissInvalidApiKey: () => setRejectedApiKey(null),
+    isResponseLoading: isResponseLoading || pendingTurn,
+    setIsResponseLoading,
+    isLoadingCitations,
+    handleChat,
+    handleNewChat,
+    setMessages,
+    cancel,
+    detach,
+    resetChat: () => {
+      detach();
+      chatIdRef.current = undefined;
+      setChatId(undefined);
+      setCurrentChatId(null);
+      setRawMessages([]);
+    },
+    chatId,
+  };
 }

@@ -1,0 +1,14 @@
+allowBuilds:
+  '@google/genai': false
+  esbuild: true
+  msgpackr-extract: false
+  protobufjs: true
+overrides:
+  'body-parser@2.3.0': 2.4.0
+  'zod@4.6.5': 4.6.7
+  'glob@11.0.3': 11.1.0
+  # GHSA-587h-7wmj-h5pm: vite <=8.1.5 (launch-editor existsSync bypass on
+  # Windows). vite is a peer dependency of vitest/vite-tsconfig-paths, so a
+  # direct devDependency bump cannot pin it; vitest's own peer range
+  # (^6.4.0 || ^7.0.0 || ^8.0.0) already allows the patched release.
+  vite: 8.1.7

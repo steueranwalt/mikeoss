@@ -1,0 +1,28 @@
+[
+  {
+    "ghsa": "GHSA-vfj7-8cjw-p6xm",
+    "reason": "braces 3.0.3 is reached only through frontend ESLint and Word webpack-dev-server development tooling. The advisory names >=3.0.4 as patched, but npm registry currently publishes only 3.0.3; pnpm cannot resolve 3.0.4. No document or request input reaches these repo-owned glob patterns. REMOVE WHEN braces 3.0.4 or a patched parent is published, then re-resolve both pnpm locks.",
+    "scopes": [
+      {
+        "workspace": "frontend",
+        "package": "braces",
+        "version": "3.0.3",
+        "path": "snapshots/braces@3.0.3",
+        "dev": true,
+        "dependents": [
+          "snapshots/micromatch@4.0.8#dependencies:braces"
+        ]
+      },
+      {
+        "workspace": "word-addin",
+        "package": "braces",
+        "version": "3.0.3",
+        "path": "snapshots/braces@3.0.3",
+        "dev": true,
+        "dependents": [
+          "snapshots/micromatch@4.0.8#dependencies:braces"
+        ]
+      }
+    ]
+  }
+]

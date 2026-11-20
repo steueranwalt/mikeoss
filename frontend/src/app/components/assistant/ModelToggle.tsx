@@ -1,115 +1,140 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronDown, Check, AlertCircle } from "lucide-react";
+import { useEffect } from "react";
 import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuLabel,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  ModelToggleUI,
+  nearestReasoningLevelForModel,
+  reasoningLevelsForModel,
+  type ReasoningLevel,
+} from "@/shared/ui/ModelToggleUI";
 import { isModelAvailable } from "@/app/lib/modelAvailability";
+import {
+  MODELS, mergeConfiguredModelOptions,
+  allRouterModelOptions,
+  modelDisplayName,
+  noModelsReason,
+  type ModelOption,
+  type NoModelsReason,
+  type RouterSelections,
+} from "@/shared/lib/modelCatalog";
 import type { ApiKeyState } from "@/app/lib/mikeApi";
+import { useAoaiDeployments } from "@/altien/models/aoaiDeployments";
+export * from "@/shared/lib/modelCatalog";
+import {
+  PERSONAL_WORKSPACE,
+  useWorkspace,
+} from "@/app/contexts/WorkspaceContext";
+import { useConfiguredModels } from "@/app/hooks/useConfiguredModels";
 
-export interface ModelOption {
-    id: string;
-    label: string;
-    group: "Anthropic" | "Google" | "OpenAI";
-}
-
-export const MODELS: ModelOption[] = [
-    { id: "claude-opus-4-7", label: "Claude Opus 4.7", group: "Anthropic" },
-    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", group: "Anthropic" },
-    { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", group: "Google" },
-    { id: "gemini-3-flash-preview", label: "Gemini 3 Flash", group: "Google" },
-    { id: "gpt-5.5", label: "GPT-5.5", group: "OpenAI" },
-    { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", group: "OpenAI" },
-];
-
-export const DEFAULT_MODEL_ID = "gemini-3-flash-preview";
-
-export const ALLOWED_MODEL_IDS = new Set(MODELS.map((m) => m.id));
-
-const GROUP_ORDER: ModelOption["group"][] = ["Anthropic", "Google", "OpenAI"];
+export type { ReasoningLevel };
 
 interface Props {
-    value: string;
-    onChange: (id: string) => void;
-    apiKeys?: ApiKeyState;
+  value: string;
+  onChange: (id: string) => void;
+  /**
+   * Loaded key state, or undefined when it is UNKNOWN (profile still
+   * loading, or the fetch failed and the app degrades). Unknown state fails
+   * open — the backend authoritatively rejects models it cannot serve.
+   */
+  apiKeys?: ApiKeyState;
+  /** True while the profile is still loading: render a neutral disabled
+   *  trigger instead of flashing "No Models" on every page load. */
+  apiKeysLoading?: boolean;
+  /** Each router's saved Model Selections; omitted while none are known. */
+  routerSelections?: Partial<RouterSelections>;
+  routerModels?: Partial<RouterSelections>;
+  compact?: boolean;
+  tone?: "muted" | "default";
+  /** A full-width form field: liquid glass, or "flat" grey like a flat select. */
+  modalInput?: boolean | "flat";
+  toolbar?: boolean;
+  /** Extra classes for the compact trigger button, for a host row's sizing. */
+  triggerClassName?: string;
+  onNoModelsClick?: (reason: NoModelsReason) => void;
+  reasoningLevel?: ReasoningLevel;
+  onReasoningChange?: (level: ReasoningLevel) => void;
 }
 
-export function ModelToggle({ value, onChange, apiKeys }: Props) {
-    const [isOpen, setIsOpen] = useState(false);
-    const selected = MODELS.find((m) => m.id === value);
-    const selectedLabel = selected?.label ?? "Model";
-    const selectedAvailable = apiKeys
-        ? isModelAvailable(value, apiKeys)
-        : true;
-
-    return (
-        <DropdownMenu onOpenChange={setIsOpen}>
-            <DropdownMenuTrigger asChild>
-                <button
-                    type="button"
-                    className={`flex items-center gap-1.5 rounded-lg px-2 h-8 text-sm transition-colors cursor-pointer text-gray-400 hover:bg-gray-100 hover:text-gray-700 ${isOpen ? "bg-gray-100 text-gray-700" : ""}`}
-                    title={
-                        !selectedAvailable
-                            ? "API key missing for selected model"
-                            : "Choose model"
-                    }
-                >
-                    {!selectedAvailable && (
-                        <AlertCircle className="h-3 w-3 shrink-0 text-red-500" />
-                    )}
-                    <span className="max-w-[140px] truncate">{selectedLabel}</span>
-                    <ChevronDown
-                        className={`h-3 w-3 shrink-0 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}
-                    />
-                </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent className="w-56 z-50" side="top" align="start">
-                {GROUP_ORDER.map((group, gi) => {
-                    const items = MODELS.filter((m) => m.group === group);
-                    if (items.length === 0) return null;
-                    return (
-                        <div key={group}>
-                            {gi > 0 && <DropdownMenuSeparator />}
-                            <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-gray-400">
-                                {group}
-                            </DropdownMenuLabel>
-                            {items.map((m) => {
-                                const available = apiKeys
-                                    ? isModelAvailable(m.id, apiKeys)
-                                    : true;
-                                return (
-                                    <DropdownMenuItem
-                                        key={m.id}
-                                        className="cursor-pointer"
-                                        onSelect={() => onChange(m.id)}
-                                    >
-                                        <span
-                                            className={`flex-1 ${available ? "" : "text-gray-400"}`}
-                                        >
-                                            {m.label}
-                                        </span>
-                                        {!available && (
-                                            <AlertCircle
-                                                className="h-3.5 w-3.5 text-red-500 ml-1"
-                                                aria-label="API key missing"
-                                            />
-                                        )}
-                                        {m.id === value && available && (
-                                            <Check className="h-3.5 w-3.5 text-gray-600 ml-1" />
-                                        )}
-                                    </DropdownMenuItem>
-                                );
-                            })}
-                        </div>
-                    );
-                })}
-            </DropdownMenuContent>
-        </DropdownMenu>
-    );
+export function ModelToggle({
+  value,
+  onChange,
+  apiKeys,
+  apiKeysLoading = false,
+  routerSelections,
+  routerModels = {},
+  compact = false,
+  tone,
+  modalInput = false,
+  toolbar = false,
+  triggerClassName,
+  onNoModelsClick,
+  reasoningLevel,
+  onReasoningChange,
+}: Props) {
+  const { modelOptions: extraModels } = useAoaiDeployments();
+  const selections = routerSelections ?? routerModels;
+  const configuredModels = useConfiguredModels();
+  const models = mergeConfiguredModelOptions(configuredModels, [
+    ...MODELS,
+    ...allRouterModelOptions(selections),
+    ...extraModels.map((model) => ({
+      ...model,
+      label: modelDisplayName(model.id),
+      source: "Azure OpenAI",
+    })),
+  ]);
+  const availableModels = models.filter((model) => {
+    if (model.source === "Configured") return true;
+    if (model.group === "Local") return true;
+    if (apiKeysLoading) return false; // nothing offered until known
+    if (!apiKeys) return true; // unknown after a failed load → fail open
+    return isModelAvailable(model.id, apiKeys, extraModels);
+  });
+  const selected = availableModels.find((model) => model.id === value);
+  const supportedReasoningLevels = reasoningLevelsForModel(value);
+  const normalizedReasoningLevel = reasoningLevel
+    ? nearestReasoningLevelForModel(value, reasoningLevel)
+    : undefined;
+  useEffect(() => {
+    if (
+      reasoningLevel &&
+      normalizedReasoningLevel &&
+      normalizedReasoningLevel !== reasoningLevel &&
+      onReasoningChange
+    ) {
+      onReasoningChange(normalizedReasoningLevel);
+    }
+  }, [normalizedReasoningLevel, onReasoningChange, reasoningLevel]);
+  const selectedLabel = apiKeysLoading
+    ? (models.find((model) => model.id === value)?.label ?? "Select model")
+    : (selected?.label ??
+      (availableModels.length > 0 ? "Select model" : "No Models"));
+  // In an organization workspace the keys and model lists are its admins'
+  // to set, so an empty picker says who can fix it.
+  const { workspaceId } = useWorkspace();
+  const inOrganization =
+    workspaceId !== null && workspaceId !== PERSONAL_WORKSPACE;
+  const emptyReason = noModelsReason(apiKeys, selections, inOrganization);
+  return (
+    <ModelToggleUI
+      value={value}
+      onChange={onChange}
+      models={availableModels}
+      selectedLabel={selectedLabel}
+      selectedAvailable={selected !== undefined}
+      loading={apiKeysLoading}
+      compact={compact}
+      tone={tone}
+      modalInput={modalInput}
+      toolbar={toolbar}
+      triggerClassName={triggerClassName}
+      emptyLabel="No Models"
+      onEmptyClick={
+        onNoModelsClick ? () => onNoModelsClick(emptyReason) : undefined
+      }
+      reasoningLevel={normalizedReasoningLevel}
+      onReasoningChange={onReasoningChange}
+      reasoningLevels={supportedReasoningLevels}
+    />
+  );
 }

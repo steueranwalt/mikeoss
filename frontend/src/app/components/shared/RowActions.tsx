@@ -1,171 +1,293 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+    Check,
     Download,
     Eye,
     EyeOff,
+    Eraser,
     FolderMinus,
-    FolderPlus,
     Hash,
     History,
+    Loader2,
     Pencil,
+    Plus,
     Trash2,
     Upload,
+    X,
 } from "lucide-react";
+import { SubfolderSvgIcon } from "@/app/components/shared/FolderSvgIcon";
+import {
+    CLOSE_ROW_ACTIONS_EVENT,
+    closeRowActionMenus,
+} from "@/app/components/shared/TablePrimitive";
+import {
+    Dropdown,
+    DropdownContent,
+    DropdownItem,
+    DropdownTrigger,
+} from "@/shared/ui/dropdown";
+import { notifyError } from "@/app/lib/userFacingError";
+import { LIQUID_GLASS_HOVER_CLASS } from "@/app/components/ui/liquid-surface";
 
-const CLOSE_ROW_ACTIONS_EVENT = "mike:close-row-actions";
+export { CLOSE_ROW_ACTIONS_EVENT, closeRowActionMenus };
 
-export function closeRowActionMenus() {
-    document.dispatchEvent(new Event(CLOSE_ROW_ACTIONS_EVENT));
-}
+export type RowAddStatus = "idle" | "pending" | "complete";
 
 interface Props {
-    onDelete?: () => void;
+    onDeselect?: () => void;
+    onView?: () => void;
+    /** Copies the row into the caller's own collection; `addLabel` names it. */
+    onAdd?: () => void;
+    addLabel?: string;
+    /** Keep the menu open to display progress and completion of an add action. */
+    addStatus?: RowAddStatus;
+    addDisabled?: boolean;
+    onDelete?: () => void | Promise<void>;
     onHide?: () => void;
     onUnhide?: () => void;
     onDownload?: () => void;
+    onClearResults?: () => void;
+    clearResultsDisabled?: boolean;
     onRemoveFromFolder?: () => void;
     onShowAllVersions?: () => void;
     onUploadNewVersion?: () => void;
     onNewSubfolder?: () => void;
+    /**
+     * Offered but refused: the caller's role cannot organize folders here.
+     * Shown disabled rather than hidden, so the menu is the same shape for
+     * everybody and the reason is legible — the same treatment Delete has.
+     */
+    newSubfolderDisabled?: boolean;
     deleting?: boolean;
+    deleteDisabled?: boolean;
+    onEditDetails?: () => void;
     onRename?: () => void;
     onUpdateCmNumber?: () => void;
+    viewLabel?: string;
+    editDetailsLabel?: string;
     newSubfolderLabel?: string;
     renameLabel?: string;
+    uploadNewVersionLabel?: string;
     deleteLabel?: string;
 }
+type RowActionMenuItemsProps = Props & {
+    /** Called when an action is chosen. The menu closes on its own. */
+    onClose?: () => void;
+};
 
+/**
+ * The actions of a row menu, as dropdown items. Render them inside a
+ * `DropdownContent`: `RowActions` does for the row's button, and
+ * `DropdownAtPoint` does for a right-click menu.
+ */
 export function RowActionMenuItems({
+    onDeselect,
+    onView,
+    onAdd,
+    addLabel = "Add",
+    addStatus,
+    addDisabled = false,
     onDelete,
     onHide,
     onUnhide,
     onDownload,
+    onClearResults,
+    clearResultsDisabled,
     onRemoveFromFolder,
     onShowAllVersions,
     onUploadNewVersion,
     onNewSubfolder,
+    newSubfolderDisabled = false,
     deleting,
+    deleteDisabled = false,
+    onEditDetails,
     onRename,
     onUpdateCmNumber,
+    viewLabel = "View",
+    editDetailsLabel = "Edit details",
     newSubfolderLabel = "New subfolder",
     renameLabel = "Rename",
+    uploadNewVersionLabel = "Upload new version",
     deleteLabel = "Delete",
     onClose,
-}: Props & { onClose: () => void }) {
+}: RowActionMenuItemsProps) {
+    const run = (action: () => void) => () => {
+        onClose?.();
+        action();
+    };
+
+    // "Delete" alone would make the title "Couldn't delete"; callers that
+    // name the row ("Delete review") already read as an action.
+    const deleteAction =
+        deleteLabel.trim().toLowerCase() === "delete"
+            ? "delete this item"
+            : deleteLabel.trim().toLowerCase();
+
+    async function runDelete() {
+        if (!onDelete) return;
+        try {
+            await onDelete();
+        } catch (error) {
+            notifyError(error, {
+                action: deleteAction,
+                onRetry: () => void runDelete(),
+            });
+        }
+    }
+
     return (
         <>
-            {onNewSubfolder && (
-                <button
-                    onClick={() => { onClose(); onNewSubfolder(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-left text-gray-600 hover:bg-gray-50 transition-colors"
+            {onDeselect && (
+                <DropdownItem onSelect={run(onDeselect)}>
+                    <X className="h-3.5 w-3.5" />
+                    Deselect rows
+                </DropdownItem>
+            )}
+            {onView && (
+                <DropdownItem onSelect={run(onView)}>
+                    <Eye className="h-3.5 w-3.5" />
+                    {viewLabel}
+                </DropdownItem>
+            )}
+            {onAdd && (
+                <DropdownItem
+                    disabled={addDisabled || addStatus === "pending" || addStatus === "complete"}
+                    aria-busy={addStatus === "pending" || undefined}
+                    className={addStatus === "complete" ? "data-[disabled]:opacity-100" : undefined}
+                    onSelect={(event) => {
+                        if (addStatus !== undefined) event.preventDefault();
+                        else onClose?.();
+                        onAdd();
+                    }}
                 >
-                    <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+                    {addStatus === "pending" ? (
+                        <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+                    ) : addStatus === "complete" ? (
+                        <Check aria-hidden="true" className="h-3.5 w-3.5 text-green-600" />
+                    ) : (
+                        <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                    <span aria-live={addStatus !== undefined ? "polite" : undefined}>{addLabel}</span>
+                </DropdownItem>
+            )}
+            {onNewSubfolder && (
+                // Offered but refused when disabled, so the menu is the same
+                // shape for everybody.
+                <DropdownItem
+                    disabled={newSubfolderDisabled}
+                    onSelect={run(onNewSubfolder)}
+                >
+                    <SubfolderSvgIcon className="h-3.5 w-3.5 shrink-0" />
                     {newSubfolderLabel}
-                </button>
+                </DropdownItem>
             )}
             {onRename && (
-                <button
-                    onClick={() => { onClose(); onRename(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors"
-                >
+                <DropdownItem onSelect={run(onRename)}>
                     <Pencil className="h-3.5 w-3.5" />
                     {renameLabel}
-                </button>
+                </DropdownItem>
+            )}
+            {onEditDetails && (
+                <DropdownItem onSelect={run(onEditDetails)}>
+                    <Pencil className="h-3.5 w-3.5" />
+                    {editDetailsLabel}
+                </DropdownItem>
             )}
             {onUpdateCmNumber && (
-                <button
-                    onClick={() => { onClose(); onUpdateCmNumber(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors"
-                >
+                <DropdownItem onSelect={run(onUpdateCmNumber)}>
                     <Hash className="h-3.5 w-3.5" />
                     Edit CM No.
-                </button>
+                </DropdownItem>
             )}
             {onDownload && (
-                <button
-                    onClick={() => { onClose(); onDownload(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors"
-                >
+                <DropdownItem onSelect={run(onDownload)}>
                     <Download className="h-3.5 w-3.5" />
                     Download
-                </button>
+                </DropdownItem>
             )}
             {onShowAllVersions && (
-                <button
-                    onClick={() => { onClose(); onShowAllVersions(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-left text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                    <History className="h-3.5 w-3.5 shrink-0" />
+                <DropdownItem onSelect={run(onShowAllVersions)}>
+                    <History className="h-3.5 w-3.5" />
                     Show all versions
-                </button>
+                </DropdownItem>
             )}
             {onUploadNewVersion && (
-                <button
-                    onClick={() => { onClose(); onUploadNewVersion(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-left text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                    <Upload className="h-3.5 w-3.5 shrink-0" />
-                    Upload new version
-                </button>
+                <DropdownItem onSelect={run(onUploadNewVersion)}>
+                    <Upload className="h-3.5 w-3.5" />
+                    {uploadNewVersionLabel}
+                </DropdownItem>
             )}
             {onRemoveFromFolder && (
-                <button
-                    onClick={() => { onClose(); onRemoveFromFolder(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-left text-gray-600 hover:bg-gray-50 transition-colors"
-                >
-                    <FolderMinus className="h-3.5 w-3.5 shrink-0" />
+                <DropdownItem onSelect={run(onRemoveFromFolder)}>
+                    <FolderMinus className="h-3.5 w-3.5" />
                     Remove from subfolder
-                </button>
+                </DropdownItem>
+            )}
+            {onClearResults && (
+                <DropdownItem disabled={clearResultsDisabled} onSelect={run(onClearResults)}>
+                    <Eraser className="h-3.5 w-3.5" />
+                    Clear results
+                </DropdownItem>
             )}
             {onUnhide && (
-                <button
-                    onClick={() => { onClose(); onUnhide(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors"
-                >
+                <DropdownItem onSelect={run(onUnhide)}>
                     <Eye className="h-3.5 w-3.5" />
-                    Unhide
-                </button>
+                    Activate
+                </DropdownItem>
             )}
             {onHide && (
-                <button
-                    onClick={() => { onClose(); onHide(); }}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-gray-600 hover:bg-gray-50 transition-colors"
-                >
+                <DropdownItem onSelect={run(onHide)}>
                     <EyeOff className="h-3.5 w-3.5" />
-                    Hide
-                </button>
+                    Deactivate
+                </DropdownItem>
             )}
             {onDelete && (
-                <button
-                    onClick={() => { onClose(); onDelete(); }}
-                    disabled={deleting}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
+                <DropdownItem
+                    variant="destructive"
+                    disabled={deleting || deleteDisabled}
+                    onSelect={run(() => { void runDelete(); })}
                 >
                     <Trash2 className="h-3.5 w-3.5" />
                     {deleteLabel}
-                </button>
+                </DropdownItem>
             )}
         </>
     );
 }
 
-export function RowActions(props: Props) {
-    const [open, setOpen] = useState(false);
-    const [coords, setCoords] = useState({ top: 0, right: 0 });
-    const btnRef = useRef<HTMLButtonElement>(null);
+/** Width shared by the row button menu and the right-click menu. */
+export const ROW_ACTION_MENU_CLASS = "w-48";
 
+function CustomRowActionItems({
+    renderItems,
+    onActionChosen,
+}: {
+    renderItems: (onActionChosen: () => void) => ReactNode;
+    onActionChosen: () => void;
+}) {
+    return renderItems(onActionChosen);
+}
+
+export function RowActions({
+    renderItems,
+    ariaLabel = "Open row actions",
+    ...props
+}: Props & {
+    /** Reuse these items in selection and right-click menus as well. */
+    renderItems?: (onActionChosen: () => void) => ReactNode;
+    ariaLabel?: string;
+}) {
+    const [open, setOpen] = useState(false);
+    // An action often opens something that takes focus itself (an inline
+    // rename field, a modal). Returning focus to the button afterwards would
+    // blur it, so focus only returns when the menu is dismissed unused.
+    const actionChosenRef = useRef(false);
+
+    // Lets a table close an open row menu when its rows change underneath it.
     useEffect(() => {
         if (!open) return;
-        function handleClick() {
-            setOpen(false);
-        }
-        document.addEventListener("click", handleClick);
-        return () => document.removeEventListener("click", handleClick);
-    }, [open]);
-
-    useEffect(() => {
         function handleCloseRowActions() {
             setOpen(false);
         }
@@ -175,47 +297,48 @@ export function RowActions(props: Props) {
                 CLOSE_ROW_ACTIONS_EVENT,
                 handleCloseRowActions,
             );
-    }, []);
-
-    function handleToggle(e: React.MouseEvent) {
-        e.stopPropagation();
-        if (open) {
-            setOpen(false);
-            return;
-        }
-        closeRowActionMenus();
-        if (btnRef.current) {
-            const rect = btnRef.current.getBoundingClientRect();
-            setCoords({
-                top: rect.bottom + 4,
-                right: window.innerWidth - rect.right,
-            });
-        }
-        setOpen(true);
-    }
+    }, [open]);
 
     return (
-        <>
-            <button
-                ref={btnRef}
-                onClick={handleToggle}
-                className="flex items-center justify-center w-6 h-6 rounded text-gray-700 hover:text-gray-900 hover:bg-gray-100 transition-colors leading-none"
-            >
-                <span className="tracking-widest text-xs">···</span>
-            </button>
-
-            {open && (
-                <div
-                    style={{ position: "fixed", top: coords.top, right: coords.right }}
-                    className="z-[120] w-48 rounded-xl border border-gray-100 bg-white shadow-lg overflow-hidden"
-                    onClick={(e) => e.stopPropagation()}
+        <Dropdown open={open} onOpenChange={setOpen}>
+            <DropdownTrigger asChild>
+                <button
+                    type="button"
+                    aria-label={ariaLabel}
+                    // The row itself is clickable; opening its menu must not
+                    // also activate the row.
+                    onClick={(event) => event.stopPropagation()}
+                    className={`flex h-6 w-6 items-center justify-center rounded leading-none text-gray-700 transition-colors hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 ${LIQUID_GLASS_HOVER_CLASS}`}
                 >
+                    <span aria-hidden className="text-xs tracking-widest">···</span>
+                </button>
+            </DropdownTrigger>
+            <DropdownContent
+                align="end"
+                className={ROW_ACTION_MENU_CLASS}
+                // React events bubble through the portal to the row.
+                onClick={(event) => event.stopPropagation()}
+                onCloseAutoFocus={(event) => {
+                    if (actionChosenRef.current) event.preventDefault();
+                    actionChosenRef.current = false;
+                }}
+            >
+                {renderItems ? (
+                    <CustomRowActionItems
+                        renderItems={renderItems}
+                        onActionChosen={() => {
+                            actionChosenRef.current = true;
+                        }}
+                    />
+                ) : (
                     <RowActionMenuItems
                         {...props}
-                        onClose={() => setOpen(false)}
+                        onClose={() => {
+                            actionChosenRef.current = true;
+                        }}
                     />
-                </div>
-            )}
-        </>
+                )}
+            </DropdownContent>
+        </Dropdown>
     );
 }
