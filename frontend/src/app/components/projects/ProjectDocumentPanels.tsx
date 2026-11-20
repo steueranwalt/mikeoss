@@ -131,6 +131,11 @@ export const ProjectDocumentPanels = memo(function ProjectDocumentPanels({
                     annotation?.kind === "citation"
                         ? (sourceDocument?.quotes ?? [])
                         : [],
+                ai_draft:
+                    !tab.versionId ||
+                    tab.versionId === document?.current_version_id
+                        ? (document?.ai_draft ?? sourceDocument?.ai_draft)
+                        : sourceDocument?.ai_draft,
             };
             return { tab, panelDocument, refetchKey };
         });

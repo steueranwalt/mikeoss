@@ -4,11 +4,16 @@ import { useRef, useState } from "react";
 import { downloadDocumentsZip, getDocumentUrl } from "@/app/lib/mikeApi";
 import { userFacingApiError } from "@/app/lib/userFacingError";
 import type { Document, Folder } from "@/app/components/shared/types";
+import {
+    AiDraftExportCancelled,
+    useAiDraftExport,
+} from "@/app/hooks/useAiDraftExport";
 
 export function useExplorerDownload() {
     const busyRef = useRef(false);
     const [downloading, setDownloading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const { confirmExport, dialog } = useAiDraftExport();
 
     async function download(target: {
         kind: "document" | "folder";
@@ -25,9 +30,11 @@ export function useExplorerDownload() {
             let url: string;
             let filename = target.filename;
             if (target.kind === "document") {
-                const file = await (target.versionId
-                    ? getDocumentUrl(target.id, target.versionId)
-                    : getDocumentUrl(target.id));
+                const file = await confirmExport((confirmToken) =>
+                    target.versionId
+                        ? getDocumentUrl(target.id, target.versionId, confirmToken)
+                        : getDocumentUrl(target.id, undefined, confirmToken),
+                );
                 url = file.url;
                 filename = file.filename || filename;
             } else {
@@ -40,6 +47,7 @@ export function useExplorerDownload() {
             anchor.download = filename;
             anchor.click();
         } catch (cause) {
+            if (cause instanceof AiDraftExportCancelled) return;
             setError(
                 userFacingApiError(
                     cause,
@@ -59,6 +67,7 @@ export function useExplorerDownload() {
     return {
         downloading,
         error,
+        confirmation: dialog,
         clearError: () => setError(null),
         downloadDocument: (document: Document, versionId?: string | null) =>
             download({

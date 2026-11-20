@@ -1805,6 +1805,7 @@ export default function ProjectAssistantChatPage() {
                     )
                 }
             />
+            {explorerDownload.confirmation}
             <WarningPopup
                 open={!!explorerDownload.error}
                 title="Download failed"

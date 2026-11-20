@@ -38,7 +38,7 @@ it("shares the live download lookup and falls back to the requested server versi
     expect(live).toHaveBeenCalledOnce();
     viewers().registerDownload("tab", null);
     await viewers().download("tab", "doc", "v", "file.docx");
-    expect(downloadDocumentFile).toHaveBeenCalledWith("doc", "v", "file.docx");
+    expect(downloadDocumentFile).toHaveBeenCalledWith("doc", "v", "file.docx", undefined);
 });
 
 it("suppresses saves only for viewers whose deletion succeeded", () => {

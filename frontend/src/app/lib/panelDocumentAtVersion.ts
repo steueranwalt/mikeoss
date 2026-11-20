@@ -17,6 +17,7 @@ export function panelDocumentAtVersion(
         }),
         version_id: version.id,
         version_number: version.version_number,
+        ai_draft: version.ai_draft === true,
         // Quotes and edits belong to the version they were produced against.
         quotes: [],
     };

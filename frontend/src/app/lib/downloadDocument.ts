@@ -14,7 +14,12 @@ export function downloadBlob(blob: Blob, filename: string) {
     }
 }
 
-export async function downloadDocumentFile(documentId: string, versionId?: string | null, filename = "document") {
-    const file = await getDocumentFile(documentId, versionId);
+export async function downloadDocumentFile(
+    documentId: string,
+    versionId?: string | null,
+    filename = "document",
+    confirmToken?: string,
+) {
+    const file = await getDocumentFile(documentId, versionId, confirmToken);
     downloadBlob(file.blob, file.filename || filename);
 }

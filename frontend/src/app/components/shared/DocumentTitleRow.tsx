@@ -13,6 +13,11 @@ import { WarningPopup } from "../popups/WarningPopup";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { DocumentVersionPicker } from "./DocumentVersionPicker";
 import type { DocumentVersion } from "@/app/lib/mikeApi";
+import {
+    AiDraftExportCancelled,
+    useAiDraftExport,
+} from "@/app/hooks/useAiDraftExport";
+import { AiDraftBadge } from "./AiDraftBadge";
 import { VersionChip } from "./VersionChip";
 import type { PanelDocument } from "./types";
 import type { DocxSaveState } from "./views/DocxRenderer.types";
@@ -33,6 +38,8 @@ export function DocumentTitleRow({
     onVersionChange,
     toolbarVisible,
     onToggleToolbar,
+    showAiDraft,
+    onApproveDraft,
 }: {
     document: PanelDocument;
     isReloading: boolean;
@@ -43,6 +50,9 @@ export function DocumentTitleRow({
     onVersionChange?: (version: DocumentVersion) => void;
     toolbarVisible?: boolean;
     onToggleToolbar?: () => void;
+    /** Gate B4 N12: the version on screen is an unreviewed AI draft. */
+    showAiDraft?: boolean;
+    onApproveDraft?: () => Promise<void> | void;
 }) {
     const isFile =
         document.type === "docx" ||
@@ -100,9 +110,16 @@ export function DocumentTitleRow({
                         ) : (
                             <VersionChip n={versionNumber} />
                         )}
+                        {showAiDraft && <AiDraftBadge />}
                     </div>
                 </div>
                 <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-2">
+                    {showAiDraft && onApproveDraft && (
+                        <ApproveDraftButton
+                            onApprove={onApproveDraft}
+                            disabled={isReloading}
+                        />
+                    )}
                     {document.type === "docx" && saveState?.ready && (
                         <DocxSaveStatus state={saveState} />
                     )}
@@ -270,6 +287,53 @@ function ExternalSourceLinkButton({
     );
 }
 
+function ApproveDraftButton({
+    onApprove,
+    disabled,
+}: {
+    onApprove: () => Promise<void> | void;
+    disabled?: boolean;
+}) {
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    return (
+        <>
+            <WarningPopup
+                open={!!error}
+                title="Draft could not be approved"
+                message={error}
+                onClose={() => setError(null)}
+            />
+            <TextButtonUI
+                size="xs"
+                aria-label="Approve draft"
+                title="Approve draft"
+                disabled={disabled || busy}
+                loading={busy}
+                onClick={async () => {
+                    if (busy || disabled) return;
+                    setBusy(true);
+                    setError(null);
+                    try {
+                        await onApprove();
+                    } catch (cause) {
+                        setError(
+                            userFacingApiError(
+                                cause,
+                                "This draft could not be approved. Please try again.",
+                            ),
+                        );
+                    } finally {
+                        setBusy(false);
+                    }
+                }}
+            >
+                Approve draft
+            </TextButtonUI>
+        </>
+    );
+}
+
 function DownloadButton({
     documentId,
     versionId,
@@ -285,6 +349,7 @@ function DownloadButton({
 }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const { confirmExport, dialog } = useAiDraftExport();
 
     const handleClick = async () => {
         if (busy || isReloading) return;
@@ -296,8 +361,11 @@ function DownloadButton({
                 await localDownload;
                 return;
             }
-            await downloadDocumentFile(documentId, versionId, filename);
+            await confirmExport((confirmToken) =>
+                downloadDocumentFile(documentId, versionId, filename, confirmToken),
+            );
         } catch (cause) {
+            if (cause instanceof AiDraftExportCancelled) return;
             setError(
                 userFacingApiError(
                     cause,
@@ -327,6 +395,7 @@ function DownloadButton({
             >
                 <Download aria-hidden="true" className="h-3.5 w-3.5" />
             </TextButtonUI>
+            {dialog}
         </>
     );
 }

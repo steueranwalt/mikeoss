@@ -60,8 +60,9 @@ describe("useFetchDocxBytes: fetch lifecycle", () => {
         const { result } = renderHook(() => useFetchDocxBytes("d1", "v with /slash"));
 
         await waitFor(() => expect(result.current.loading).toBe(false));
-        // encodeURIComponent — spaces are %20, slashes are %2F.
-        expect(receivedSearch).toBe("?version_id=v%20with%20%2Fslash");
+        // encodeURIComponent — spaces are %20, slashes are %2F. purpose=display
+        // marks this a viewer read, not an export (Gate B4 audit finding N20).
+        expect(receivedSearch).toBe("?version_id=v%20with%20%2Fslash&purpose=display");
     });
 
     it("keeps server error details out of the document viewer", async () => {

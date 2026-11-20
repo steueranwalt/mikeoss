@@ -15,9 +15,10 @@ import type { Citation, EditAnnotation, PanelDocument } from "./types";
 import { quoteVerificationState } from "../assistant/message/citationVerification";
 import { CaseView } from "../assistant/CaseView";
 import { useResolvedPanelDocument } from "../assistant/useResolvedPanelDocument";
-import type { DocumentVersion } from "@/app/lib/mikeApi";
+import { approveAiDraftVersion, type DocumentVersion } from "@/app/lib/mikeApi";
 import { DocumentTitleRow } from "./DocumentTitleRow";
 import { DocumentAnnotationLayer } from "./DocumentAnnotationLayer";
+import { AiDraftBanner } from "./AiDraftBanner";
 import { resolveDocumentViewType } from "@/app/lib/documentViewType";
 
 /**
@@ -126,6 +127,9 @@ export function DocumentContent({
         return () => observer.disconnect();
     }, []);
     const [saveState, setSaveState] = useState<DocxSaveState | null>(null);
+    const [approvedDraftKey, setApprovedDraftKey] = useState<string | null>(
+        null,
+    );
     const onSaveStateChange = useCallback(
         (_documentId: string, state: DocxSaveState | null) =>
             setSaveState(state),
@@ -148,6 +152,11 @@ export function DocumentContent({
 
     const documentId = resolvedDocument.document_id;
     const versionId = resolvedDocument.version_id ?? null;
+    const draftKey = `${documentId}:${versionId ?? ""}`;
+    const showAiDraft =
+        resolvedDocument.ai_draft === true &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
     const isCase = resolvedDocument.type === "case";
     const viewType = resolveDocumentViewType({
         filename: resolvedDocument.title,
@@ -251,6 +260,18 @@ export function DocumentContent({
                                 ? () => setToolbarVisible((visible) => !visible)
                                 : undefined
                         }
+                        showAiDraft={showAiDraft}
+                        onApproveDraft={
+                            showAiDraft && canEdit && versionId
+                                ? async () => {
+                                      await approveAiDraftVersion(
+                                          documentId,
+                                          versionId,
+                                      );
+                                      setApprovedDraftKey(draftKey);
+                                  }
+                                : undefined
+                        }
                     />
                 }
                 annotation={
@@ -301,6 +322,7 @@ export function DocumentContent({
                     ) : undefined
                 }
             >
+                {showAiDraft && <AiDraftBanner />}
                 {isCase ? (
                     <CaseView
                         document={resolvedDocument}

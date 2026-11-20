@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { downloadDocumentFile } from "@/app/lib/downloadDocument";
 import type { DocxCloseGuard } from "@/app/components/shared/views/DocxRenderer.types";
+import { useAiDraftExport } from "@/app/hooks/useAiDraftExport";
 
 /** Share live editor downloads and protect closing/replacing dirty viewers. */
 export function useDocumentViewers() {
@@ -11,6 +12,7 @@ export function useDocumentViewers() {
     const guards = useRef(new Map<string, DocxCloseGuard>());
     const busy = useRef(false);
     const [pending, setPending] = useState<{ guards: DocxCloseGuard[]; close: () => void } | null>(null);
+    const { confirmExport, dialog: aiDraftDialog } = useAiDraftExport();
     const registerDownload = useCallback((id: string, download: (() => Promise<void>) | null) => {
         if (download) downloads.current.set(id, download);
         else downloads.current.delete(id);
@@ -21,8 +23,12 @@ export function useDocumentViewers() {
     }, []);
     const download = useCallback((id: string, documentId: string, versionId?: string | null, filename?: string) => {
         const live = downloads.current.get(id);
-        return live ? live() : downloadDocumentFile(documentId, versionId, filename);
-    }, []);
+        return live
+            ? live()
+            : confirmExport((confirmToken) =>
+                  downloadDocumentFile(documentId, versionId, filename, confirmToken),
+              );
+    }, [confirmExport]);
     // Call only after confirmed deletion succeeds. A cancelled/failed deletion
     // must retain its draft; a deleted document must not save again on unmount.
     const discardDeleted = useCallback((ids: string[]) => {
@@ -56,5 +62,5 @@ export function useDocumentViewers() {
             busy.current = false;
         }}
     />;
-    return { registerDownload, registerCloseGuard, download, requestClose, discardDeleted, confirmation };
+    return { registerDownload, registerCloseGuard, download, requestClose, discardDeleted, confirmation: <>{confirmation}{aiDraftDialog}</> };
 }

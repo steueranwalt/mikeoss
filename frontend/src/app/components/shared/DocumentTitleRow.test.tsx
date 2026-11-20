@@ -77,3 +77,19 @@ it("reports a save failure in a warning popup that returns if a retry fails agai
         "Your changes could not be saved.",
     );
 });
+
+it("shows the KI-Entwurf badge and approve-draft action for an unreviewed draft", () => {
+    const onApproveDraft = vi.fn().mockResolvedValue(undefined);
+    render(
+        <DocumentTitleRow
+            document={document}
+            isReloading={false}
+            compactActions
+            showAiDraft
+            onApproveDraft={onApproveDraft}
+        />,
+    );
+    expect(screen.getByText("KI-Entwurf")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Approve draft" }));
+    expect(onApproveDraft).toHaveBeenCalledOnce();
+});

@@ -66,6 +66,11 @@ import type { OwnerGate } from "@/app/components/projects/ProjectWorkspace";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
 import { UploadOverlay } from "@/app/components/assistant/UploadOverlay";
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
+import { AiDraftBadge } from "@/app/components/shared/AiDraftBadge";
+import {
+    AiDraftExportCancelled,
+    useAiDraftExport,
+} from "@/app/hooks/useAiDraftExport";
 import {
     UserVisibleError,
     notifyError,
@@ -453,6 +458,10 @@ export function DocTable({
     const [addDocsOpen, setAddDocsOpen] = useState(false);
     const { user } = useAuth();
     const ownProfile = useOptionalUserProfile()?.profile;
+    const { confirmExport, dialog: aiDraftExportDialog } = useAiDraftExport();
+    const [clearedAiDraftDocIds, setClearedAiDraftDocIds] = useState(
+        () => new Set<string>(),
+    );
     const [viewingDoc, setViewingDoc] = useState<Document | null>(null);
     const [viewingDocVersion, setViewingDocVersion] = useState<{
         id: string;
@@ -619,8 +628,13 @@ export function DocTable({
             // and downloads through downloadResolvedDocument (bearer fetch
             // + blob; absolute R2 URLs still use a plain <a>). It prefers
             // the backend's resolved filename and falls back to `filename`.
-            await downloadResolvedDocument(docId, versionId, filename);
+            // Gate B4 N12: a 409 unresolved_ai_edits opens the export
+            // confirmation dialog bound to that version's confirm_token.
+            await confirmExport((confirmToken) =>
+                downloadResolvedDocument(docId, versionId, filename, confirmToken),
+            );
         } catch (e) {
+            if (e instanceof AiDraftExportCancelled) return;
             notifyError(e, {
                 action: "download this version",
                 supportNote: `Document ${docId}, version ${versionId}`,
@@ -2915,8 +2929,16 @@ export function DocTable({
                                                             onBlur={() => void submitDocumentRename(doc.id)}
                                                         />
                                                     ) : (
-                                                        <span className="text-xs text-gray-800 truncate">
-                                                            {docName}
+                                                        <span className="flex min-w-0 items-center gap-1.5 text-xs text-gray-800">
+                                                            <span className="truncate">
+                                                                {docName}
+                                                            </span>
+                                                            {doc.ai_draft &&
+                                                                !clearedAiDraftDocIds.has(
+                                                                    doc.id,
+                                                                ) && (
+                                                                    <AiDraftBadge />
+                                                                )}
                                                         </span>
                                                     )}
                                                 </div>
@@ -3322,8 +3344,15 @@ export function DocTable({
         }
         // Upstream divergence (OSS-6, §2.3 item 6): Azure download URLs are
         // relative, auth-guarded proxy paths — see downloadDocVersion.
-        await downloadResolvedDocument(docId, null, "document");
-    }, [catalog]);
+        try {
+            await confirmExport((confirmToken) =>
+                downloadResolvedDocument(docId, null, "document", confirmToken),
+            );
+        } catch (e) {
+            if (e instanceof AiDraftExportCancelled) return;
+            throw e;
+        }
+    }, [catalog, confirmExport]);
 
     const selectedFolderRootIds = useMemo(
         () => folderSelectionRootIds(folders, selectedFolderIds),
@@ -5090,7 +5119,29 @@ export function DocTable({
                 onDelete={async (doc) => {
                     await handleRemoveDoc(doc.id);
                 }}
+                onAiDraftApproved={(documentId, versionId) => {
+                    const currentId =
+                        versionsByDocId.get(documentId)?.currentVersionId ??
+                        docs.find((row) => row.id === documentId)
+                            ?.current_version_id;
+                    if (versionId && currentId && versionId !== currentId) {
+                        return;
+                    }
+                    setClearedAiDraftDocIds((current) => {
+                        const next = new Set(current);
+                        next.add(documentId);
+                        return next;
+                    });
+                    setDocuments((current) =>
+                        current.map((row) =>
+                            row.id === documentId
+                                ? { ...row, ai_draft: false }
+                                : row,
+                        ),
+                    );
+                }}
             />
+            {aiDraftExportDialog}
         </div>
     );
 }
