@@ -116,8 +116,25 @@ jobs:
       - name: Numbered migration history database guarantees
         run: bash scripts/test-migration-ledger-db.sh
 
-      - name: Google Workspace approval database guarantees
-        run: bash scripts/test-google-workspace-db.sh
+      # A "Google Workspace approval database guarantees" step calling
+      # scripts/test-google-workspace-db.sh used to run here. That script
+      # does not exist in this tree, or in Altien/mikeOssAzure's own main:
+      # it was added in #434 and deleted in b31c8aa6 ("adapt Google
+      # connectors to Azure auth and private Postgres") because its SQL
+      # bootstrapped the pre-Azure Supabase schema the migration removed
+      # (`create role anon; create role authenticated; ...; create schema
+      # auth; create table auth.users(...)`, then replayed
+      # backend/migrations/20260922_01_google_workspace.sql against it) —
+      # none of which matches this deployment's actual Postgres schema. The
+      # CI step invoking it was never updated or removed at the time, so it
+      # failed every run with "scripts/test-google-workspace-db.sh: No such
+      # file or directory" (exit 127). Removed here rather than replaced:
+      # there is no existing equivalent real-Postgres integration test for
+      # Google Workspace connector approvals to switch to (only
+      # googleWorkspace.test.ts's in-memory fake store, already covered by
+      # the "Unit tests (parallel)" step above). Writing a real-Postgres
+      # version of that coverage needs the current grants/RLS/migration
+      # replay invariants spelled out first — see the report's open items.
 
   frontend:
     runs-on: ubuntu-latest

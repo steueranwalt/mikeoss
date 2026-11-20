@@ -12,6 +12,10 @@ overrides:
   markdown-it: ^14.3.3
   '@modelcontextprotocol/sdk': ^1.32.0
   handlebars: ^4.7.10
+  adm-zip: 0.6.1
+  node-forge: 1.4.3
+  follow-redirects: 1.16.3
+  '@azure/msal-node': 7.2.3
 
 importers:
 
@@ -248,12 +252,12 @@ packages:
     resolution: {integrity: sha512-VQ5/gTLFADkwue+FohVuCqlzFPUq4xSrX8jeZe+iwZuY6moliNC8xt86qPVNYdtbQfELDf2Nu6LI+demFPHGgw==}
     engines: {node: '>=0.8.0'}
 
-  '@azure/msal-common@16.14.1':
-    resolution: {integrity: sha512-Or6xhPNyi4zHW25158yxBoyxuCqNSPa5YBVqfF1J5Ks4MJWBo/USXdp05DQIPu1Zli00YZu6t0+h6KvHJealxQ==}
-    engines: {node: '>=0.8.0'}
-
   '@azure/msal-common@16.14.2':
     resolution: {integrity: sha512-HOBR0Gfo39TMrkxNG8k6cfjRkrRjXZc3JQs3ebMWQc9S4cihuknMYra3sgmzbZB752oQBqBN9+WF7c826p2vIQ==}
+    engines: {node: '>=0.8.0'}
+
+  '@azure/msal-common@16.17.0':
+    resolution: {integrity: sha512-rNvtEm7Axzj18neIk0C8kjr1ZXbJsHkWDqGedCfOiLVBjSCxWBcbJ26/I7g9owoeGKUoyrOgs73cIk7WxLd9qA==}
     engines: {node: '>=0.8.0'}
 
   '@azure/msal-node-extensions@1.5.32':
@@ -263,8 +267,8 @@ packages:
   '@azure/msal-node-runtime@0.20.6':
     resolution: {integrity: sha512-89Al7l5c8sOEA954d35WZOg1sCa2WKfgf7KyTbN9vIkKsoZrXdJ5+CPjy8+tQqWcsJTAMbQD4OWr7V09/xN8KA==}
 
-  '@azure/msal-node@6.0.1':
-    resolution: {integrity: sha512-ixSO1Y/kCVRthRs+hSx/5qkwaunX1/RAePhlMN0wIpIQ4WEZ6AREGGnGd1AP0qspHVsAwzWQKGubpjh50JyJIQ==}
+  '@azure/msal-node@7.2.3':
+    resolution: {integrity: sha512-eRIo5XuQAJrubo4514gEnmREKI35045LItjucOEK/YNQYj3LhEpYEbBdqjlu/wmd9Rcqp2c3GJ4ynFoEqby3sg==}
     engines: {node: '>=20'}
 
   '@azure/storage-blob@12.34.0':
@@ -1758,18 +1762,6 @@ packages:
     resolution: {integrity: sha512-4B/qKCfeE/ODUaAUpSwfzazo5x29WD4r3vXiWsB7I2mSDAihwEqKO+g8GELZUQSSAo5e1XTYh3ZVfLyxBc12nA==}
     engines: {node: '>= 10.0.0'}
 
-  adm-zip@0.5.12:
-    resolution: {integrity: sha512-6TVU49mK6KZb4qG6xWaaM4C7sA/sgUMLy/JYMOzkcp3BvVLpW0fXDFQiIzAuxFCt/2+xD7fNIiPFAoLZPhVNLQ==}
-    engines: {node: '>=6.0'}
-
-  adm-zip@0.5.16:
-    resolution: {integrity: sha512-TGw5yVi4saajsSEgz25grObGHEUaDrniwvA2qwSC060KfqGPdglhvPMA2lPIoxs3PQIItj2iag35fONcQqgUaQ==}
-    engines: {node: '>=12.0'}
-
-  adm-zip@0.5.18:
-    resolution: {integrity: sha512-ufJnssQGbxzLNS1Ho9bCtX4rQKCCvoVuDLHoJyc3F9dOGDB4BkWs2Ci0kv53lqocAEQ/Cbi+I2XCsNYGqVYqng==}
-    engines: {node: '>=12.0'}
-
   adm-zip@0.6.1:
     resolution: {integrity: sha512-Xwrja8nx9e5o2N1my4DsKCeKpdrnACyr1wtbPxBDgGzKzKyE9kRtBFA8mWldI+RVlD7CBZNWY/wQ2+ydwOR6kQ==}
     engines: {node: '>=14.0'}
@@ -1877,6 +1869,7 @@ packages:
 
   axios-retry@3.9.1:
     resolution: {integrity: sha512-8PJDLJv7qTTMMwdnbMvrLYuvB47M81wRtxQmEdV5w4rgbTXTt+vtPkXwajOfOdSyv/wZICJOC+/UhXH4aQ/R+w==}
+    deprecated: axios-retry is no longer maintained. See https://github.com/softonic/axios-retry for alternatives.
 
   axios@1.20.0:
     resolution: {integrity: sha512-r8aOh8j9cGKpgQAqpzrUHnSIc6a59Y3Xf/cv8sy1DrHCkZHzQGEuoq1tARk6qSyDdtQGSDgpb9kFlruzPvrgwg==}
@@ -2570,8 +2563,8 @@ packages:
   flatted@3.4.4:
     resolution: {integrity: sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==}
 
-  follow-redirects@1.16.1:
-    resolution: {integrity: sha512-FNvFGzoMLWmE6Yj9spb/zjd7yiNCHiAW9/Tg9CXrQ8wuu32HtlJOwWO11OJafl5FfY3DxTdQ0vj42zU1kvv5jg==}
+  follow-redirects@1.16.3:
+    resolution: {integrity: sha512-toOSoqN6d51Wjf1aOFJYcoVv1aND9rj/CwjLU0Vz40oDuSpWDayCeKe4JpL5NL0WdFvoOOCI3BRo69HahjbR1A==}
     engines: {node: '>=4.0'}
     peerDependencies:
       debug: '*'
@@ -3520,8 +3513,8 @@ packages:
     resolution: {integrity: sha512-dRB78srN/l6gqWulah9SrxeYnxeddIG30+GOqK/9OlLVyLg3HPnr6SqOWTWOXKRwC2eGYCkZ59NNuSgvSrpgOA==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
 
-  node-forge@1.4.0:
-    resolution: {integrity: sha512-LarFH0+6VfriEhqMMcLX2F7SwSXeWwnEAJEsYm5QKWchiVYVvJyV9v7UDvUv+w5HO23ZpQTXDv/GxdDdMyOuoQ==}
+  node-forge@1.4.3:
+    resolution: {integrity: sha512-P6wzfh6t70avmV8FrVEAd/36sOPJQ+hkaJVX1Laap9J/77m7M0eyozDvc8SwnDf4P7MP94gwbAAo0rg3YVXT+g==}
     engines: {node: '>= 6.13.0'}
 
   node-machine-id@1.1.12:
@@ -4915,7 +4908,7 @@ snapshots:
       '@azure/core-util': 1.14.0
       '@azure/logger': 1.4.0
       '@azure/msal-browser': 5.24.0
-      '@azure/msal-node': 6.0.1
+      '@azure/msal-node': 7.2.3
       open: 10.2.0
       tslib: 2.8.1
     transitivePeerDependencies:
@@ -4938,9 +4931,9 @@ snapshots:
 
   '@azure/msal-common@15.17.0': {}
 
-  '@azure/msal-common@16.14.1': {}
-
   '@azure/msal-common@16.14.2': {}
+
+  '@azure/msal-common@16.17.0': {}
 
   '@azure/msal-node-extensions@1.5.32':
     dependencies:
@@ -4950,9 +4943,9 @@ snapshots:
 
   '@azure/msal-node-runtime@0.20.6': {}
 
-  '@azure/msal-node@6.0.1':
+  '@azure/msal-node@7.2.3':
     dependencies:
-      '@azure/msal-common': 16.14.1
+      '@azure/msal-common': 16.17.0
       jsonwebtoken: 9.0.3
 
   '@azure/storage-blob@12.34.0':
@@ -5366,7 +5359,7 @@ snapshots:
 
   '@microsoft/kiota@1.31.1':
     dependencies:
-      adm-zip: 0.5.18
+      adm-zip: 0.6.1
       original-fs: 1.2.0
       uuid: 13.0.2
       vscode-jsonrpc: 8.2.1
@@ -5387,7 +5380,7 @@ snapshots:
       '@azure/arm-subscriptions': 5.1.1
       '@azure/core-auth': 1.11.0
       '@azure/identity': 4.13.3
-      '@azure/msal-node': 6.0.1
+      '@azure/msal-node': 7.2.3
       '@azure/msal-node-extensions': 1.5.32
       '@inquirer/core': 5.1.2
       '@inquirer/prompts': 7.10.1(@types/node@26.6.5)
@@ -5478,7 +5471,7 @@ snapshots:
       mustache: 4.2.0
       neverthrow: 3.2.0
       node-fetch: 3.3.2
-      node-forge: 1.4.0
+      node-forge: 1.4.3
       office-addin-manifest: 2.1.6
       office-addin-project: 1.0.10(@types/node@26.6.5)
       openapi-types: 7.2.3
@@ -6586,12 +6579,6 @@ snapshots:
 
   address@1.2.2: {}
 
-  adm-zip@0.5.12: {}
-
-  adm-zip@0.5.16: {}
-
-  adm-zip@0.5.18: {}
-
   adm-zip@0.6.1: {}
 
   agent-base@6.0.2:
@@ -6696,7 +6683,7 @@ snapshots:
 
   axios@1.20.0(debug@4.4.3):
     dependencies:
-      follow-redirects: 1.16.1(debug@4.4.3)
+      follow-redirects: 1.16.3(debug@4.4.3)
       form-data: 4.0.6
       https-proxy-agent: 5.0.1
       proxy-from-env: 2.1.0
@@ -7418,7 +7405,7 @@ snapshots:
 
   flatted@3.4.4: {}
 
-  follow-redirects@1.16.1(debug@4.4.3):
+  follow-redirects@1.16.3(debug@4.4.3):
     optionalDependencies:
       debug: 4.4.3
 
@@ -8423,7 +8410,7 @@ snapshots:
   mkcert@3.2.0:
     dependencies:
       commander: 11.1.0
-      node-forge: 1.4.0
+      node-forge: 1.4.3
 
   mkdirp-classic@0.5.3: {}
 
@@ -8487,7 +8474,7 @@ snapshots:
       fetch-blob: 3.2.0
       formdata-polyfill: 4.0.10
 
-  node-forge@1.4.0: {}
+  node-forge@1.4.3: {}
 
   node-machine-id@1.1.12: {}
 
@@ -8604,7 +8591,7 @@ snapshots:
   office-addin-manifest@2.1.6:
     dependencies:
       '@microsoft/app-manifest': 1.1.2
-      adm-zip: 0.5.16
+      adm-zip: 0.6.1
       chalk: 2.4.2
       commander: 13.1.0
       fs-extra: 7.0.1
@@ -8642,7 +8629,7 @@ snapshots:
 
   office-addin-project@1.0.10(@types/node@26.6.5):
     dependencies:
-      adm-zip: 0.5.12
+      adm-zip: 0.6.1
       commander: 13.1.0
       fs-extra: 7.0.1
       inquirer: 12.11.1(@types/node@26.6.5)

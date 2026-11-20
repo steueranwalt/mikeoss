@@ -491,7 +491,6 @@ Live Google consent and external mutation checks are required in addition to moc
 
 ```bash
 npm test --prefix backend -- src/lib/integrations/__tests__/googleWorkspace.test.ts src/__tests__/integration/googleWorkspace.routes.test.ts
-bash backend/scripts/test-google-workspace-db.sh
 npm test --prefix backend -- src/modules/chat/engine/__tests__/connectorApprovals.test.ts src/modules/chat/engine/__tests__/googleWorkspaceDispatch.test.ts
 npm test --prefix frontend -- "src/app/(pages)/settings/connectors/page.test.tsx" src/app/components/assistant/AskInputPopup.test.tsx src/app/lib/mikeApi.test.ts
 npx playwright test e2e/google-workspace.spec.ts e2e/connector-approval.spec.ts
@@ -501,6 +500,17 @@ npm run typecheck --prefix frontend
 npm run lint --prefix frontend
 ```
 
-The database script uses a new throwaway PostgreSQL container, no host ports, and removes it on exit. It verifies actual grants/RLS configuration, cross-provider and replayed authorization, write access following the granted scopes, settings surviving a reconnect, and migration replay. It never connects to your configured Supabase database.
+> **Note:** a `backend/scripts/test-google-workspace-db.sh` real-Postgres
+> integration script (throwaway container, no host ports; verified actual
+> grants/RLS configuration, cross-provider and replayed authorization, write
+> access following the granted scopes, settings surviving a reconnect, and
+> migration replay) existed from #434 and was deleted in b31c8aa6 when its
+> SQL setup (Supabase-era `auth.users`/`anon`/`authenticated`/`service_role`
+> roles, `backend/migrations/20260922_01_google_workspace.sql`) stopped
+> matching this deployment's Azure-adapted schema. The CI step invoking it
+> was removed along with it; the commands above (the in-memory fake-store
+> unit tests) are what actually runs today. A real-Postgres equivalent would
+> need the current grants/RLS/migration-replay invariants written fresh, not
+> a port of the deleted script.
 
 PR #434 contains the complete integration and targets `main`. It includes both migrations and all three service connections; there is no separate child PR to merge. CI verifies application builds/tests, production images, schema drift, security, Supabase, browser behavior, and the Word add-in.
