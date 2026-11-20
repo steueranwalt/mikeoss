@@ -95,6 +95,14 @@ describe.skipIf(!container && !pgliteModule)(
                 execFileSync("docker", ["exec", container!, "createdb", "-U", "postgres", database]);
                 created = true;
             }
+            // 0058_word_document_edits.sql revokes/grants against these
+            // PostgREST-style roles; a disposable plain postgres:16-alpine
+            // container does not have them yet.
+            await execute(`do $$ begin
+              if not exists(select 1 from pg_roles where rolname='web_anon') then create role web_anon; end if;
+              if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if;
+              if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role; end if;
+            end $$;`);
         }, 60_000);
 
         afterAll(async () => {
