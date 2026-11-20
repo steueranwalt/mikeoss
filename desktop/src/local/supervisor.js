@@ -308,7 +308,9 @@ async function startLocalStack(app, status = () => {}) {
     await waitFor("backend", () => httpOk(`${BACKEND_URL}/api/health`));
 
     // Dev serves the static export and runtime /config from the backend.
-    await waitFor("frontend", () => httpOk(`${FRONTEND_URL}/login`, [200, 307, 308]));
+    // /login is also a directory (login/sso), so express.static 301s /login
+    // to /login/; treat that redirect as ready, not a failed boot.
+    await waitFor("frontend", () => httpOk(`${FRONTEND_URL}/login`, [200, 301, 302, 307, 308]));
 
     throwIfAborted();
     running = true;

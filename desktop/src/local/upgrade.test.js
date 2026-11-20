@@ -10,8 +10,8 @@ const { spawn, spawnSync } = require("node:child_process");
 const { Client } = require("pg");
 const schema = require("./schema");
 // Numbered-migration tree restored on this fork (not upstream's dated-name
-// SHA, which is not in this history). Later files (0176, 0178–0181) are the
-// upgrade under test.
+// SHA, which is not in this history). The test copies 0000–0108 from this
+// tree as the pre-checksum install, then upgrades through current files.
 const BASELINE_REF = "6b776948c537f2bd8c15ac9b6d748245afb8f2fe";
 const REPO = path.resolve(__dirname, "../../..");
 const BACKEND = path.join(REPO, "backend");
@@ -98,7 +98,13 @@ test("numbered desktop upgrades converge with fresh installs and never replay ap
     fs.writeFileSync(path.join(baseline, "dist/scripts/migrationLedger.js"),
       `module.exports = require(${JSON.stringify(helper)});`);
     const oldFiles = git("ls-tree", "--name-only", BASELINE_REF, "backend/migrations/")
-      .trim().split("\n").filter((file) => /\/\d{4}_[a-z0-9_]+\.sql$/i.test(file));
+      .trim().split("\n").filter((file) => {
+        const name = path.basename(file);
+        // 0109 introduces the checksum column. Files before that are the
+        // unverified older history this assertion covers; this fork restored
+        // 0000–0175 in one commit, so the prefix is taken from that tree.
+        return /^\d{4}_[a-z0-9_]+\.sql$/i.test(name) && Number(name.slice(0, 4)) < 109;
+      });
     assert.ok(oldFiles.length > 0);
     for (const file of oldFiles) {
       fs.writeFileSync(path.join(baseline, "migrations", path.basename(file)), git("show", `${BASELINE_REF}:${file}`));
