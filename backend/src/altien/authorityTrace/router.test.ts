@@ -303,9 +303,10 @@ describe("Authority Trace HTML exports", () => {
       )
       .set("Authorization", "Bearer valid-token");
     expect(forced.status).toBe(200);
-    expect(forced.headers["content-disposition"]).toContain(
-      "authority-trace-run-1-review.html",
-    );
+    expect(forced.headers["content-disposition"]).toContain("inline");
+    expect(forced.headers["cache-control"]).toBe("no-store");
+    expect(forced.headers["x-mike-ai-draft"]).toBe("1");
+    expect(forced.text).toContain("KI-Entwurf, nicht freigegeben");
     expect(forced.text).toContain("DEGRADED EXPORT");
   });
 
@@ -323,6 +324,38 @@ describe("Authority Trace HTML exports", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.headers["content-disposition"]).toContain("inline");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
+    expect(response.text).toContain("KI-Entwurf, nicht freigegeben");
     expect(response.text).toContain("@page { size: letter landscape;");
+  });
+
+  it("requires confirmation to download the HTML as an AI-draft attachment (N35)", async () => {
+    getCitationVerificationRunMock.mockResolvedValue({
+      id: "run-1",
+      project_id: "project-1",
+    });
+    checkProjectAccessMock.mockResolvedValue({ ok: true });
+    getAuthorityTraceWorkspaceMock.mockResolvedValue(exportWorkspace());
+
+    const blocked = await request(makeApp())
+      .get("/api/authority-trace/runs/run-1/review.html?download=1")
+      .set("Authorization", "Bearer valid-token");
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.code).toBe("unresolved_ai_edits");
+    expect(blocked.body.ai_draft).toBe(true);
+    expect(typeof blocked.body.confirm_token).toBe("string");
+
+    const downloaded = await request(makeApp())
+      .get(
+        `/api/authority-trace/runs/run-1/review.html?download=1&confirm_token=${blocked.body.confirm_token}`,
+      )
+      .set("Authorization", "Bearer valid-token");
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.headers["content-disposition"]).toContain("attachment");
+    expect(downloaded.headers["content-disposition"]).toContain("[KI-ENTWURF]");
+    expect(downloaded.headers["cache-control"]).toBe("no-store");
+    expect(downloaded.text).toContain("KI-Entwurf, nicht freigegeben");
   });
 });

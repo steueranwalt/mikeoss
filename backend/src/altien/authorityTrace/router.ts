@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Router } from "express";
 import { requireAuth } from "../../middleware/auth";
 import { checkProjectAccess } from "../../lib/access";
@@ -14,7 +15,17 @@ import {
   buildReviewHtml,
 } from "./core/htmlExports";
 import { createServerSupabase } from "../../lib/supabase";
+import { withAiDraftFilenamePrefix } from "../../lib/documentVersions";
 import { ZodError } from "zod";
+
+function authorityTraceHtmlConfirmToken(
+  runId: string,
+  kind: "review" | "audit",
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ run_id: runId, kind, ai_draft: true }))
+    .digest("hex");
+}
 
 export const authorityTraceRouter = Router();
 
@@ -96,10 +107,39 @@ for (const exportType of ["review", "audit"] as const) {
           exportType === "review"
             ? buildReviewHtml(workspace, { originalsRequested })
             : buildAuditHtml(workspace, { originalsRequested });
+        const filename = `authority-trace-${run.id}-${exportType}.html`;
+        const expectedToken = authorityTraceHtmlConfirmToken(
+          run.id,
+          exportType,
+        );
+        const downloadRequested =
+          req.query.download === "1" || req.query.download === "true";
+        const confirmToken =
+          typeof req.query.confirm_token === "string"
+            ? req.query.confirm_token
+            : undefined;
+        // Gate B4 audit finding N35 (preliminary, pending Nils): treat like
+        // the chat export. Display is inline with the KI-Entwurf banner and
+        // Cache-Control: no-store. Download/export needs confirmation and
+        // the KI-Entwurf filename marking.
+        if (downloadRequested && confirmToken !== expectedToken) {
+          return res.status(409).json({
+            code: "unresolved_ai_edits",
+            detail:
+              "This Authority Trace HTML is an unreviewed AI draft. Confirm the download with the current confirm_token to get it marked as an AI draft.",
+            confirm_token: expectedToken,
+            ai_draft: true,
+            pending_edit_ids: [],
+          });
+        }
         res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("X-Mike-Ai-Draft", "1");
         res.setHeader(
           "Content-Disposition",
-          `attachment; filename="authority-trace-${run.id}-${exportType}.html"`,
+          downloadRequested
+            ? `attachment; filename="${withAiDraftFilenamePrefix(filename)}"`
+            : `inline; filename="${filename}"`,
         );
         return res.send(html);
       } catch (err) {
