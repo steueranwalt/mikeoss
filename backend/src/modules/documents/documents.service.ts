@@ -37,10 +37,12 @@ export {
     createVersionFromDocument,
     renameVersion,
     deleteVersion,
+    approveAiDraftVersion,
 } from "./documents.versions";
 
 export {
     resolveEdit,
+    hasPendingDocumentEdits,
 } from "./documents.edits";
 
 export {

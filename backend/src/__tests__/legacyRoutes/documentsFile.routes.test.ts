@@ -11,8 +11,13 @@ const mocks = vi.hoisted(() => ({
   loadActiveVersion: vi.fn(),
 }));
 
+// Gate B4 audit finding L3: how many pending document_edits rows the
+// hasPendingDocumentEdits count-query sees. 0 by default (every pre-existing
+// test in this file expects the unconfirmed-download path to be unaffected).
+let pendingEditsCount = 0;
+
 const database = {
-  from: vi.fn(() => {
+  from: vi.fn((table: string) => {
     const query: Record<string, unknown> = {};
     for (const method of ["select", "eq"]) {
       query[method] = vi.fn(() => query);
@@ -27,6 +32,14 @@ const database = {
       },
       error: null,
     }));
+    if (table === "document_edits") {
+      // hasPendingDocumentEdits never calls .single(); it awaits the
+      // select/eq chain itself and reads { count } off the result.
+      query.then = (resolve: (value: unknown) => unknown) =>
+        Promise.resolve({ count: pendingEditsCount, error: null }).then(
+          resolve,
+        );
+    }
     return query;
   }),
 };
@@ -72,6 +85,7 @@ app.use("/single-documents", documentsRouter);
 describe("GET /single-documents/:documentId/file", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    pendingEditsCount = 0;
     mocks.ensureDocAccess.mockResolvedValue({ ok: true, isCreator: true });
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-2",
@@ -158,5 +172,88 @@ describe("GET /single-documents/:documentId/file", () => {
 
     expect(response.status).toBe(404);
     expect(mocks.loadActiveVersion).not.toHaveBeenCalled();
+  });
+
+  // Gate B4 audit finding L3.
+  describe("documents with unresolved AI-proposed changes", () => {
+    beforeEach(() => {
+      pendingEditsCount = 1;
+      mocks.loadActiveVersion.mockResolvedValue({
+        id: "version-2",
+        storage_path: "documents/user-1/document-1/source.docx",
+        pdf_storage_path: null,
+        version_number: 2,
+        filename: "brief.docx",
+        source: "assistant_edit",
+        file_type: "docx",
+        size_bytes: 3,
+        page_count: null,
+      });
+      mocks.headFile.mockResolvedValue({
+        size: 3,
+        etag: '"etag"',
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    });
+
+    it("refuses the download with 409 without explicit confirmation", async () => {
+      const response = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("unresolved_ai_edits");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+      expect(mocks.downloadFile).not.toHaveBeenCalled();
+    });
+
+    it("serves a watermarked file once the caller confirms the AI draft", async () => {
+      const w_ns =
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      zip.file(
+        "word/document.xml",
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+          `<w:document ${w_ns}><w:body><w:p><w:r><w:t>Original.</w:t></w:r></w:p></w:body></w:document>`,
+      );
+      const original = await zip.generateAsync({ type: "arraybuffer" });
+      mocks.downloadFile.mockResolvedValue(original);
+
+      const response = await request(app)
+        .get("/single-documents/document-1/file?confirm_ai_draft=1")
+        .set("Authorization", "Bearer test")
+        .buffer(true)
+        .parse((res, callback) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => callback(null, Buffer.concat(chunks)));
+        });
+
+      expect(response.status).toBe(200);
+      expect(mocks.downloadFile).toHaveBeenCalledWith(
+        "documents/user-1/document-1/source.docx",
+      );
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+      const stampedZip = await JSZip.loadAsync(response.body as Buffer);
+      const xml = await stampedZip.file("word/document.xml")!.async("string");
+      expect(xml).toContain("KI-ENTWURF");
+      expect(xml).toContain("Original.");
+    });
+
+    it("downloads unchanged once no changes are pending", async () => {
+      pendingEditsCount = 0;
+
+      const response = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(200);
+      expect(mocks.createFileReadStream).toHaveBeenCalledWith(
+        "documents/user-1/document-1/source.docx",
+      );
+      expect(mocks.downloadFile).not.toHaveBeenCalled();
+    });
   });
 });

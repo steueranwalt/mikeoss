@@ -18,6 +18,25 @@ import { devLog } from "../../lib/log";
 // Accept / reject a tracked-change edit
 // ---------------------------------------------------------------------------
 
+/**
+ * Gate B4 audit finding L3: whether `documentId` currently carries any
+ * AI-proposed tracked change that has not yet been accepted or rejected.
+ * Export/download routes use this to require explicit confirmation before
+ * handing out a file whose visible content does not yet reflect what a
+ * human has actually approved.
+ */
+export async function hasPendingDocumentEdits(
+    documentId: string,
+    db: Db,
+): Promise<boolean> {
+    const { count } = await db
+        .from("document_edits")
+        .select("id", { count: "exact", head: true })
+        .eq("document_id", documentId)
+        .eq("status", "pending");
+    return (count ?? 0) > 0;
+}
+
 export async function resolveEdit(
     mode: "accept" | "reject",
     documentId: string,

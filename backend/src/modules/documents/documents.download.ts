@@ -15,6 +15,7 @@ import {
 } from "../../lib/documentDisplay";
 import { downloadFilenameForVersion, type Db } from "./documents.shared";
 import { ensureDocumentAccess } from "./documents.access";
+import { hasPendingDocumentEdits } from "./documents.edits";
 
 // ---------------------------------------------------------------------------
 // Display
@@ -435,6 +436,8 @@ export async function getFileStreamSource(
           fileType: string | null;
           size: number;
           filename: string;
+          /** Gate B4 audit finding L3: see hasPendingDocumentEdits. */
+          hasPendingEdits: boolean;
       }
     | { ok: false; detail: string }
 > {
@@ -456,5 +459,6 @@ export async function getFileStreamSource(
             active.version_number,
             active.source === "assistant_edit",
         ),
+        hasPendingEdits: await hasPendingDocumentEdits(documentId, db),
     };
 }

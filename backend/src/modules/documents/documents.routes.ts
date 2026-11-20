@@ -13,7 +13,8 @@ import { asyncRoute, routerErrorHandler } from "../../middleware/asyncRoute";
 import { createServerSupabase } from "../../lib/supabase";
 import { sendInternalError } from "../../lib/httpError";
 import { setOperation } from "../../lib/observability/sentry";
-import { buildContentDisposition, createFileReadStream } from "../../lib/storage";
+import { buildContentDisposition, createFileReadStream, downloadFile } from "../../lib/storage";
+import { stampAiDraftWatermark } from "../../lib/docxAiDraftWatermark";
 import { sendDocumentDisplay } from "../../lib/documentDisplay";
 import { contentTypeForDocumentType } from "../../lib/documentTypes";
 import { uniqueArchiveFilename } from "../../lib/zipExport";
@@ -28,7 +29,9 @@ import {
     createVersionFromDocument,
     renameVersion,
     deleteVersion,
+    approveAiDraftVersion,
     resolveEdit,
+    hasPendingDocumentEdits,
 } from "./documents.service";
 
 export const documentsRouter = Router();
@@ -106,6 +109,14 @@ documentsRouter.get("/:documentId/display", requireAuth, asyncRoute(async (req, 
 // fetch the file without depending on cross-origin access to signed R2 URLs.
 // The service locates and sizes the object; the stream is opened here so
 // `res` is what applies backpressure to the object-storage read.
+//
+// Gate B4 audit finding L3: a document with unresolved AI-proposed tracked
+// changes (document_edits.status='pending') refuses the download with 409
+// unless the caller explicitly confirms it wants the draft anyway
+// (?confirm_ai_draft=1). A confirmed .docx download is then served with a
+// visible "AI draft, not approved" banner stamped in, so the file itself
+// carries the warning wherever it ends up — not just this response. Without
+// any pending edit, the download is unchanged.
 documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
@@ -124,12 +135,35 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
     if (!result.ok)
         return void res.status(404).json({ detail: result.detail });
 
+    if (result.hasPendingEdits && req.query.confirm_ai_draft !== "1") {
+        return void res.status(409).json({
+            code: "unresolved_ai_edits",
+            detail:
+                "This document has AI-proposed changes that have not been accepted or rejected yet. " +
+                "Confirm the download with ?confirm_ai_draft=1 to get it anyway, marked as an AI draft, " +
+                "or resolve the pending changes first.",
+        });
+    }
+
     res.setHeader("Content-Type", contentTypeForDocumentType(result.fileType));
-    res.setHeader("Content-Length", result.size);
     res.setHeader(
         "Content-Disposition",
         buildContentDisposition("inline", result.filename),
     );
+
+    if (result.hasPendingEdits && result.fileType === "docx") {
+        // Watermarking needs the whole file to parse and rewrite the zip, so
+        // this path cannot stream: it reads the object fully, stamps it, and
+        // sends the result. Every other download (no pending edits, or a
+        // pending-edit file this module cannot stamp) keeps streaming below.
+        const bytes = await downloadFile(result.storagePath);
+        if (!bytes) return void res.status(404).json({ detail: "Document bytes not available" });
+        const stamped = await stampAiDraftWatermark(Buffer.from(bytes));
+        res.setHeader("Content-Length", stamped.byteLength);
+        return void res.send(stamped);
+    }
+
+    res.setHeader("Content-Length", result.size);
     const source = createFileReadStream(result.storagePath);
     try {
         await pipeline(source, res);
@@ -216,6 +250,12 @@ documentsRouter.post("/download-zip", requireAuth, asyncRoute(async (req, res) =
 // GET /single-documents/:documentId/url
 // Optional ?version_id= selects a specific tracked-changes version.
 // Otherwise falls back to documents.current_version_id, else the original upload.
+//
+// Gate B4 audit finding L3: same confirmation gate as /file (409 without
+// ?confirm_ai_draft=1 while changes are pending). This route hands back a
+// signed URL pointing straight at the stored object, so unlike /file it
+// cannot stamp the AI-draft banner into what the signed URL serves — callers
+// that need the visible banner must use /file instead.
 documentsRouter.get("/:documentId/url", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
@@ -223,6 +263,19 @@ documentsRouter.get("/:documentId/url", requireAuth, asyncRoute(async (req, res)
     const versionIdParam =
         typeof req.query.version_id === "string" ? req.query.version_id : null;
     const db = createServerSupabase();
+
+    if (
+        req.query.confirm_ai_draft !== "1" &&
+        (await hasPendingDocumentEdits(documentId, db))
+    ) {
+        return void res.status(409).json({
+            code: "unresolved_ai_edits",
+            detail:
+                "This document has AI-proposed changes that have not been accepted or rejected yet. " +
+                "Confirm the download with ?confirm_ai_draft=1 to get it anyway, or resolve the " +
+                "pending changes first.",
+        });
+    }
 
     const result = await getDownloadUrl(
         documentId,
@@ -341,6 +394,33 @@ documentsRouter.patch(
                 userId,
                 userEmail,
             },
+            db,
+        );
+        if (!result.ok)
+            return void res
+                .status(result.status ?? 404)
+                .json({ detail: result.detail });
+        res.json(result.version);
+    }),
+);
+
+// POST /single-documents/:documentId/versions/:versionId/approve-draft
+// Gate B4 audit finding L4: clears the "AI draft" flag generate_docx /
+// generate_excel / generate_ppt / write_project_document set on their own
+// output. Only a human calling this route — never the assistant tools
+// themselves — can do that.
+documentsRouter.post(
+    "/:documentId/versions/:versionId/approve-draft",
+    requireAuth,
+    asyncRoute(async (req, res) => {
+        setOperation("documents.version");
+        const userId = res.locals.userId as string;
+        const userEmail = res.locals.userEmail as string | undefined;
+        const { documentId, versionId } = req.params;
+        const db = createServerSupabase();
+
+        const result = await approveAiDraftVersion(
+            { documentId, versionId, userId, userEmail },
             db,
         );
         if (!result.ok)
