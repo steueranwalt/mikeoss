@@ -54,8 +54,9 @@ const enrichedFields = {
   page_count: activeVersion.page_count,
   textless_page_count: activeVersion.textless_page_count,
   content_sha256: activeVersion.content_sha256,
-  // Gate B4 audit finding L4.
+  // Gate B4 audit finding L4/N31.
   ai_draft: false,
+  unresolved_ai: false,
 };
 // Dev drift: Dev mounts the projects/library routers under /api/....
 const paths = [
@@ -77,7 +78,10 @@ describe.each(paths)("rename response compatibility: %s", (path) => {
         data: { filename: "new.pdf" },
       },
       ...(isProject
-        ? [{ table: "document_versions", data: [activeVersion] }]
+        ? [
+            { table: "document_versions", data: [activeVersion] },
+            { table: "document_edits", data: [] },
+          ]
         : []),
     ]);
     state.db = fake.db;
