@@ -30,7 +30,11 @@ vi.mock("./client", async (original) => ({
   ...(await original<typeof import("./client")>()),
   validateRemoteMcpUrl: async (url: string) => url,
 }));
-import { authConfigPatch, isMcpWriteTool } from "./client";
+import {
+  authConfigPatch,
+  isMcpWriteTool,
+  resetAdminReadOnlyConnectorAllowlistCacheForTests,
+} from "./client";
 import {
   executeMcpToolCall,
   executeApprovedMcpToolCall,
@@ -102,7 +106,10 @@ beforeEach(() => {
     content: [{ type: "text", text: "sent" }],
   });
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  resetAdminReadOnlyConnectorAllowlistCacheForTests();
+});
 it("read-only mode must block a write tool whose server omitted annotations", async () => {
   const { connector, tool, db } = fixture({});
   connector.read_only = true;
@@ -229,4 +236,60 @@ it("retains an approval across routine token refresh", async () => {
       .event.status,
   ).toBe("ok");
   expect(mocks.callTool).toHaveBeenCalledOnce();
+});
+
+// Gate B4 audit finding L1: the server's own readOnlyHint must not skip
+// approval; the admin allowlist (keyed on server URL) is the only exemption.
+it("a direct (non-approved) call is refused for a self-reported read-only tool with no allowlist entry", async () => {
+  const { tool, db } = fixture({ readOnlyHint: true });
+  await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, db);
+  expect(mocks.callTool).not.toHaveBeenCalled();
+});
+it("a direct call runs once the connector's exact server URL is admin-allowlisted", async () => {
+  const { connector, tool, db } = fixture({ readOnlyHint: true });
+  resetAdminReadOnlyConnectorAllowlistCacheForTests();
+  vi.stubEnv(
+    "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+    JSON.stringify([connector.server_url]),
+  );
+  await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, db);
+  expect(mocks.callTool).toHaveBeenCalledOnce();
+});
+it("erkenntnis_zurueckschreiben still runs through approval even on an allowlisted connector", async () => {
+  const { connector } = fixture({ readOnlyHint: true });
+  const tool = {
+    id: "t1",
+    connector_id: "c1",
+    tool_name: "erkenntnis_zurueckschreiben",
+    openai_tool_name: "mcp_c1_erkenntnis_zurueckschreiben",
+    enabled: true,
+    annotations: { readOnlyHint: true },
+    requires_confirmation: false,
+  };
+  const chain = {
+    select: () => chain,
+    eq: () => chain,
+    filter: () => chain,
+    maybeSingle: async () => ({ data: null, error: null }),
+    single: async () => ({
+      data: { ...tool, user_mcp_connectors: { ...connector } },
+      error: null,
+    }),
+    insert: async () => ({ error: null }),
+  };
+  const toolDb = { from: () => chain } as unknown as Db;
+  resetAdminReadOnlyConnectorAllowlistCacheForTests();
+  vi.stubEnv(
+    "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON",
+    JSON.stringify([connector.server_url]),
+  );
+  const plan = await planMcpToolCall(
+    personalConnectorOwner("u1"),
+    tool.openai_tool_name,
+    { text: "hello" },
+    toolDb,
+  );
+  expect(plan.type).toBe("approval");
+  await executeMcpToolCall(personalConnectorOwner("u1"), tool.openai_tool_name, { text: "hello" }, toolDb);
+  expect(mocks.callTool).not.toHaveBeenCalled();
 });

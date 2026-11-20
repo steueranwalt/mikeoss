@@ -18,6 +18,7 @@ import {
     openaiToolName,
     toConnectorSummary,
     isMcpWriteTool,
+    mcpToolRequiresApproval,
     mcpToolRequiresWriteAccess,
     mcpConnectionFingerprint,
     validateCustomHeaders,
@@ -573,9 +574,13 @@ function unavailableTool(
 const MAX_APPROVAL_ARGUMENT_CHARS = 200_000;
 
 /**
- * Decides whether a call runs now or waits for the user's approval: a write
- * tool on a connector whose "Ask for permission for write actions" setting is
- * on waits; everything else runs.
+ * Decides whether a call runs now or waits for the user's approval. Gate B4:
+ * every MCP tool call waits for approval, with no per-connector or
+ * per-request opt-out — "Ask for permission for write actions" is always on,
+ * not a setting. The only way a call runs immediately is
+ * mcpToolRequiresApproval finding the connector on the administrator's
+ * read-only allowlist (audit finding L1); a tool's own readOnlyHint
+ * annotation plays no part in this decision.
  */
 export async function planMcpToolCall(
     owner: ConnectorOwner,
@@ -586,9 +591,7 @@ export async function planMcpToolCall(
     const resolved = await resolveCallableTool(owner, openaiToolName, db);
     if (!resolved) return { type: "result", ...unavailableTool(openaiToolName) };
     const { connector, tool } = resolved;
-    // Gate B4: every write tool is planned as an approval, unconditionally —
-    // require_write_approval is no longer a per-connector escape hatch.
-    if (!mcpToolRequiresWriteAccess(tool)) return { type: "run" };
+    if (!mcpToolRequiresApproval(connector, tool)) return { type: "run" };
     if (JSON.stringify(args).length > MAX_APPROVAL_ARGUMENT_CHARS) {
         return {
             type: "result",
@@ -725,9 +728,12 @@ async function callResolvedTool(
                     throw new Error(
                         "This connector tool was changed, turned off, or set to read-only.",
                     );
-                // Gate B4: write approval is mandatory, not a per-connector
-                // setting — require_write_approval is never false.
-                if (mcpToolRequiresWriteAccess(current.tool) && !approvedFingerprint)
+                // Gate B4 audit finding L1: re-checks the same
+                // administrator-allowlist decision planMcpToolCall already
+                // made, not the tool's own (untrusted) annotations — a
+                // direct, non-approved call is refused unless this exact
+                // connector is on the allowlist.
+                if (mcpToolRequiresApproval(current.connector, current.tool) && !approvedFingerprint)
                     throw new Error(
                         "This connector action requires approval in the assistant.",
                     );

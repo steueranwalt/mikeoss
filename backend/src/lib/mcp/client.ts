@@ -248,6 +248,15 @@ function truthyAnnotation(
     return annotations?.[key] === true;
 }
 
+/**
+ * The tool's own self-reported classification — untrusted input from the
+ * remote MCP server, not a security decision. Used only to pick which tools
+ * a "read only" connector hides from its owner (toConnectorSummary,
+ * buildUserMcpTools, resolveCallableTool) and to label a tool in the
+ * connector UI; never to decide whether a call may skip the user's approval.
+ * See mcpToolRequiresApproval below for that decision (Gate B4 audit
+ * finding L1).
+ */
 export function isMcpWriteTool(
     annotations: Record<string, unknown> | null | undefined,
 ) {
@@ -264,6 +273,126 @@ export function mcpToolRequiresWriteAccess(
     tool: Pick<ToolCacheRow, "annotations" | "requires_confirmation">,
 ) {
     return tool.requires_confirmation || isMcpWriteTool(tool.annotations);
+}
+
+// --- Gate B4 audit finding L1 -------------------------------------------
+//
+// mcpToolRequiresWriteAccess (above) used to also gate whether a call could
+// skip the user's approval: `!mcpToolRequiresWriteAccess(tool)` ran a tool
+// immediately whenever the remote server's own readOnlyHint annotation said
+// `true`. That trusts the server to grade its own homework — a write tool
+// the server mislabels readOnlyHint:true (by bug or by design) ran with no
+// approval at all. mcpToolRequiresApproval below is the approval gate now;
+// it does not look at annotations, requires_confirmation, or any other
+// server-supplied signal. The only way a tool skips approval is an
+// administrator's allowlist entry for its connector's exact server URL,
+// below — and even that never covers a name in
+// ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES.
+
+/**
+ * Tool names that must always pause for the user's approval, independent of
+ * any admin allowlist entry below. Defense in depth for a tool whose own
+ * name signals it writes data back, so one allowlisted-connector mistake (or
+ * a future tool with a deceptively read-sounding server annotation) cannot
+ * exempt it. Extend this set for other write-by-name MCP tools as they
+ * appear.
+ */
+export const ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES: ReadonlySet<string> =
+    new Set(["erkenntnis_zurueckschreiben"]);
+
+/**
+ * `serverUrl`, normalized so a trailing slash or letter-case difference in
+ * an allowlist entry does not create or miss a match against the connector
+ * being checked. Returns null for a URL that does not parse (never matches).
+ */
+function normalizedServerUrlKey(serverUrl: string): string | null {
+    try {
+        const url = new URL(serverUrl);
+        return `${url.protocol}//${canonicalHostname(url)}${url.pathname.replace(/\/+$/, "")}`;
+    } catch {
+        return null;
+    }
+}
+
+let cachedAdminReadOnlyConnectorUrls: ReadonlySet<string> | undefined;
+
+/**
+ * Connectors an administrator has reviewed and approved to run every tool
+ * without per-call approval — identified by the connector's exact server
+ * URL, never by its own editable display name and never by a tool's
+ * self-reported annotations (see mcpToolRequiresApproval). Configured
+ * out-of-repo via MCP_ADMIN_READ_ONLY_CONNECTORS_JSON (a JSON array of
+ * server URL strings), the same one-env-var-per-deployment pattern as
+ * lib/llm/registry.ts's MIKE_MODEL_CONFIG_JSON: this public repository must
+ * not carry firm-specific infrastructure names. A deployment's own
+ * configuration is what actually names its real internal "Wissen"
+ * (knowledge base) and "QM" (quality management) MCP servers this way.
+ */
+function adminReadOnlyConnectorUrls(): ReadonlySet<string> {
+    if (cachedAdminReadOnlyConnectorUrls) return cachedAdminReadOnlyConnectorUrls;
+    const raw = process.env.MCP_ADMIN_READ_ONLY_CONNECTORS_JSON?.trim();
+    if (!raw) {
+        cachedAdminReadOnlyConnectorUrls = new Set();
+        return cachedAdminReadOnlyConnectorUrls;
+    }
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error) {
+        throw new Error(
+            `MCP_ADMIN_READ_ONLY_CONNECTORS_JSON is not valid JSON: ${
+                error instanceof Error ? error.message : String(error)
+            }`,
+        );
+    }
+    if (!Array.isArray(parsed)) {
+        throw new Error(
+            "MCP_ADMIN_READ_ONLY_CONNECTORS_JSON must be a JSON array of server URL strings",
+        );
+    }
+    const normalized = new Set<string>();
+    for (const entry of parsed) {
+        if (typeof entry !== "string") continue;
+        const key = normalizedServerUrlKey(entry);
+        if (key) normalized.add(key);
+    }
+    cachedAdminReadOnlyConnectorUrls = normalized;
+    return cachedAdminReadOnlyConnectorUrls;
+}
+
+/** Test-only: forces the next read to re-parse the environment variable. */
+export function resetAdminReadOnlyConnectorAllowlistCacheForTests(): void {
+    cachedAdminReadOnlyConnectorUrls = undefined;
+}
+
+/**
+ * Whether `toolName` on the connector at `serverUrl` may run without
+ * pausing for the user's approval. Gate B4 audit finding L1: an
+ * administrator's allowlist entry for the exact server URL is the only way
+ * to exempt a tool, and ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES overrides even
+ * that.
+ */
+export function isApprovalExemptMcpTool(
+    serverUrl: string,
+    toolName: string,
+): boolean {
+    if (ALWAYS_REQUIRES_APPROVAL_TOOL_NAMES.has(toolName)) return false;
+    const key = normalizedServerUrlKey(serverUrl);
+    return key !== null && adminReadOnlyConnectorUrls().has(key);
+}
+
+/**
+ * The user-approval gate: true unless the connector is on the admin
+ * allowlist above. Deliberately independent of isMcpWriteTool,
+ * mcpToolRequiresWriteAccess, tool.annotations and tool.requires_confirmation
+ * — none of those are trustworthy for this decision (Gate B4 audit
+ * finding L1).
+ */
+export function mcpToolRequiresApproval(
+    connector: Pick<ConnectorRow, "server_url">,
+    tool: Pick<ToolCacheRow, "tool_name">,
+): boolean {
+    return !isApprovalExemptMcpTool(connector.server_url, tool.tool_name);
 }
 
 const deriveCredentialFingerprint = promisify(crypto.scrypt);
