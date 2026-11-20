@@ -889,23 +889,26 @@ describe("Google Drive connection lifecycle", () => {
     };
     const state = "a".repeat(32);
 
-    it("saves Drive approval and tool settings", async () => {
+    it("Gate B4: shows Drive's approval switch as always on and disabled, and still saves tool settings", async () => {
         const status = {
             ...ready, connected: true, writeEnabled: true, grantId: "drive-grant",
             tools: [...driveTools, { name: "google_drive_trash_file", title: "Move to Trash", description: "Trash a file.", write: true, enabled: true }],
         };
         vi.mocked(getGoogleDriveStatus).mockResolvedValue(status);
-        vi.mocked(updateGoogleDriveSettings).mockResolvedValue({ ...status, requireWriteApproval: true });
         vi.mocked(setGoogleDriveToolEnabled).mockResolvedValue({ ...status, requireWriteApproval: true, tools: status.tools.map((t) => ({ ...t, enabled: !t.write })) });
         render(<ConnectorsPage />);
         await act(flushMicrotasks);
         fireEvent.click(screen.getByRole("button", { name: "Manage Google Drive" }));
         const dialog = within(screen.getByRole("dialog"));
+        // Gate B4: always on and disabled, not wired to any update call.
+        const approval = dialog.getByRole("switch", { name: "Ask for permission for write actions" });
+        expect(approval).toHaveAttribute("aria-checked", "true");
+        expect(approval).toBeDisabled();
         await act(async () => {
-            fireEvent.click(dialog.getByRole("switch", { name: "Ask for permission for write actions" }));
+            fireEvent.click(approval);
             await flushMicrotasks();
         });
-        expect(updateGoogleDriveSettings).toHaveBeenCalledWith({ requireWriteApproval: true }, "personal", expect.any(Function));
+        expect(updateGoogleDriveSettings).not.toHaveBeenCalled();
         await act(async () => {
             fireEvent.click(dialog.getByRole("switch", { name: "Move to Trash enabled" }));
             await flushMicrotasks();
@@ -1069,9 +1072,13 @@ describe("Google Drive connection lifecycle", () => {
         });
         const dialog = within(screen.getByRole("dialog"));
         expect(dialog.getByText("Search files")).toBeTruthy();
+        // Gate B4: always shown as on, regardless of the connector's stored
+        // value (`ready` declares requireWriteApproval: false above) — the
+        // toggle itself is also disabled; see "saves Drive approval and tool
+        // settings" and the dedicated "Gate B4" tests below.
         expect(
             dialog.getByRole("switch", { name: "Ask for permission for write actions" }),
-        ).toHaveAttribute("aria-checked", "false");
+        ).toHaveAttribute("aria-checked", "true");
         vi.mocked(getGoogleDriveStatus).mockResolvedValue(ready);
         await act(async () => {
             fireEvent.click(screen.getByRole("button", { name: "Delete" }));
@@ -1244,11 +1251,7 @@ describe("Connector write approval settings", () => {
         return within(screen.getByRole("dialog"));
     }
 
-    it("sets Gmail's approval and tool switches from the shared Manage dialog", async () => {
-        vi.mocked(updateGoogleWorkspaceSettings).mockResolvedValue({
-            ...gmailStatus,
-            requireWriteApproval: true,
-        });
+    it("Gate B4: shows Gmail's approval switch as always on and disabled, and still lets tool switches be set", async () => {
         vi.mocked(setGoogleWorkspaceToolEnabled).mockResolvedValue({
             ...gmailStatus,
             requireWriteApproval: true,
@@ -1263,19 +1266,19 @@ describe("Connector write approval settings", () => {
         expect(dialog.getByText("Account")).toBeTruthy();
         expect(dialog.getByText(gmailStatus.accountEmail!)).toBeTruthy();
         expect(dialog.getByText("Write")).toBeTruthy();
+        // Gate B4: always on and disabled, regardless of the connector's
+        // stored value (gmailStatus declares requireWriteApproval: false
+        // above) and not wired to any update call.
         const approval = dialog.getByRole("switch", {
             name: "Ask for permission for write actions",
         });
-        expect(approval).toHaveAttribute("aria-checked", "false");
+        expect(approval).toHaveAttribute("aria-checked", "true");
+        expect(approval).toBeDisabled();
         await act(async () => {
             fireEvent.click(approval);
             await flushMicrotasks();
         });
-        expect(updateGoogleWorkspaceSettings).toHaveBeenCalledWith(
-            "gmail",
-            { requireWriteApproval: true },
-            "personal",
-        expect.any(Function),);
+        expect(updateGoogleWorkspaceSettings).not.toHaveBeenCalled();
         expect(approval).toHaveAttribute("aria-checked", "true");
 
         await act(async () => {
@@ -1292,7 +1295,7 @@ describe("Connector write approval settings", () => {
         expect.any(Function),);
     });
 
-    it("sets an MCP connector's approval setting and lets write tools be switched", async () => {
+    it("Gate B4: shows an MCP connector's approval switch as always on and disabled, and still lets write tools be switched", async () => {
         const slack = makeSummary({
             id: "slack-1",
             name: "Slack",
@@ -1316,10 +1319,6 @@ describe("Connector write approval settings", () => {
         });
         vi.mocked(listMcpConnectors).mockResolvedValue([slack]);
         vi.mocked(getMcpConnector).mockResolvedValue(slack);
-        vi.mocked(updateMcpConnector).mockResolvedValue({
-            ...slack,
-            requireWriteApproval: true,
-        });
         vi.mocked(setMcpToolEnabled).mockResolvedValue({
             ...slack,
             tools: [{ ...slack.tools[0], enabled: false }],
@@ -1331,17 +1330,17 @@ describe("Connector write approval settings", () => {
             await flushMicrotasks();
         });
         const dialog = within(screen.getByRole("dialog"));
+        // Gate B4: always on and disabled, not wired to any update call.
+        const approval = dialog.getByRole("switch", {
+            name: "Ask for permission for write actions",
+        });
+        expect(approval).toHaveAttribute("aria-checked", "true");
+        expect(approval).toBeDisabled();
         await act(async () => {
-            fireEvent.click(
-                dialog.getByRole("switch", {
-                    name: "Ask for permission for write actions",
-                }),
-            );
+            fireEvent.click(approval);
             await flushMicrotasks();
         });
-        expect(updateMcpConnector).toHaveBeenCalledWith("slack-1", {
-            requireWriteApproval: true,
-        });
+        expect(updateMcpConnector).not.toHaveBeenCalled();
         const tool = dialog.getByRole("switch", { name: "Post message enabled" });
         expect(tool).toBeEnabled();
         await act(async () => {
