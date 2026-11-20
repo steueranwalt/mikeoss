@@ -280,8 +280,9 @@ async function recheckWorkspaceWrite(
   const { grant } = await resolveCall(db, owner, name, input);
   if (grant.grant_id !== grantId)
     throw new GoogleWorkspaceError("The Google connection changed. Review the action again.");
-  // Dev (sync-log: 2ec7cfc1): approval fails closed — only an explicit false skips it.
-  if (!approved && grant.require_write_approval !== false)
+  // Gate B4: write approval is mandatory, not a per-connector setting — see
+  // connectorSettingsPatch(). require_write_approval is never false.
+  if (!approved)
     throw new GoogleWorkspaceError("This Google action requires approval in the assistant.");
 }
 
@@ -304,8 +305,8 @@ export async function planGoogleWorkspaceCall(
       name,
       input,
     );
-    if (!tool.write || grant.require_write_approval === false)
-      return { type: "run" };
+    // Gate B4: every write tool is planned as an approval, unconditionally.
+    if (!tool.write) return { type: "run" };
     const token = await workspaceAccessToken(db, owner, provider);
     const action = await prepareWorkspaceAction(provider, name, args, token);
     const item: Omit<ConnectorApprovalItem, "id"> = {

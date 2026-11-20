@@ -52,7 +52,6 @@ export function ConnectorDetailsModal({
     onDelete,
     onToolEnabled,
     onReadOnly,
-    onRequireWriteApproval,
 }: {
     connector: ConnectorDetailsView | null;
     busyKey: string | null;
@@ -66,7 +65,6 @@ export function ConnectorDetailsModal({
     onDelete: () => void;
     onToolEnabled: (toolId: string, enabled: boolean) => void;
     onReadOnly: (enabled: boolean) => void;
-    onRequireWriteApproval?: (enabled: boolean) => void;
 }) {
     // The picked section is stored against the connector it was picked for, so
     // opening a different connector falls back to "details" without an effect
@@ -161,8 +159,7 @@ export function ConnectorDetailsModal({
                                 />
                             </div>
                             {!connector.readOnly &&
-                                connector.requireWriteApproval !== undefined &&
-                                onRequireWriteApproval && (
+                                connector.requireWriteApproval !== undefined && (
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="min-w-0">
                                             <p
@@ -174,24 +171,20 @@ export function ConnectorDetailsModal({
                                             </p>
                                             <p className="mt-0.5 text-xs text-gray-500">
                                                 {hasWriteTools || toolsLoading
-                                                    ? "Mike asks you in the chat before running an action that changes data."
+                                                    ? "Mike always asks you in the chat before running an action that changes data. This cannot be turned off."
                                                     : "This connector has no write actions right now."}
                                             </p>
                                         </div>
+                                        {/* Gate B4: always on, not a user setting. Shown disabled
+                                            rather than removed so the control's presence still
+                                            communicates "every write needs approval" the same way
+                                            it did when this was configurable. */}
                                         <ToggleSwitchUI
                                             className="shrink-0"
-                                            checked={
-                                                connector.requireWriteApproval
-                                            }
-                                            disabled={busyKey !== null}
-                                            aria-busy={
-                                                busyKey ===
-                                                `approval:${connector.id}`
-                                            }
+                                            checked={true}
+                                            disabled
                                             aria-labelledby={`write-approval-${connector.id}`}
-                                            onCheckedChange={
-                                                onRequireWriteApproval
-                                            }
+                                            onCheckedChange={() => {}}
                                         />
                                     </div>
                                 )}

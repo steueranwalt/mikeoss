@@ -169,19 +169,27 @@ describe("MCP write approvals", () => {
 
     const writeTool = () => ({ ...makeTool(), requires_confirmation: true });
 
-    it("runs write tools directly unless the connector asks for permission", async () => {
+    it("Gate B4: holds a write for approval even if require_write_approval is stored as false", async () => {
+        // Defense in depth: the application no longer ever writes `false` to
+        // this column (connectorSettingsPatch, updateUserMcpConnector) and
+        // the database rejects it too (migration 0176's CHECK constraint),
+        // but a row from before that migration, or a direct DB edit, must
+        // not bypass approval.
         const db = makeDb(
             writeTool(),
             { ...makeConnector(), require_write_approval: false },
             [],
         );
         expect(
-            await planMcpToolCall(personalConnectorOwner("user-1"), "evil_do_thing", { a: 1 }, db),
-        ).toEqual({ type: "run" });
+            (await planMcpToolCall(personalConnectorOwner("user-1"), "evil_do_thing", { a: 1 }, db))
+                .type,
+        ).toBe("approval");
     });
 
-    // Dev divergence (sync-log: 2ec7cfc1): only an explicit false skips
-    // approval; a missing setting (unmigrated row) still holds the write.
+    // Gate B4: require_write_approval cannot skip approval at all anymore
+    // (see the test above); this covers the simpler case of a missing
+    // setting (unmigrated row), which always held the write even before
+    // Gate B4.
     it("holds a write for approval when the setting is absent", async () => {
         const db = makeDb(writeTool(), makeConnector(), []);
         expect(

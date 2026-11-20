@@ -39,7 +39,11 @@ function store(overrides: Record<string, unknown> = {}) {
       access_token_tag: token.tag,
       expires_at: "2099-01-01T00:00:00Z",
       enabled: true,
-      require_write_approval: false,
+      // Gate B4: every write now needs approval; tests that exercise a
+      // direct, already-approved write go through approval()/
+      // executeApprovedGoogleDriveCall() instead of relying on this being
+      // false.
+      require_write_approval: true,
       disabled_tools: [],
       ...overrides,
     },
@@ -113,24 +117,24 @@ describe("Drive write access", () => {
     expect(s.tokens[0].disabled_tools).toEqual(["google_drive_trash_file", "google_drive_list_recent"]);
   });
 
-  it("blocks a write when read-only is enabled during metadata reads", async () => {
+  it("blocks an approved write when read-only was turned on since the review", async () => {
     const s = store();
-    vi.mocked(fetch).mockImplementation(async () => {
-      s.tokens[0].read_only = true;
-      return Response.json(current);
-    });
-    const result = await executeGoogleDriveToolCall(personalConnectorOwner("user-1"), "google_drive_update_file", { file_id: "file-1", name: "Changed" }, s.db);
+    const item = await approval(s.db, "google_drive_update_file", { file_id: "file-1", name: "Changed" });
+    s.tokens[0].read_only = true;
+    const result = await executeApprovedGoogleDriveCall(personalConnectorOwner("user-1"), item, s.db);
     expect(result.event.status).toBe("error");
     expect(result.content).toContain("read-only");
-    expect(vi.mocked(fetch).mock.calls.every(([,init]) => !init?.method || init.method === "GET")).toBe(true);
+    expect(mutations()).toEqual([]);
   });
 
-  it("reads a file's state once for a write that needs no approval", async () => {
+  it("executes an approved write after a single metadata read", async () => {
     const s = store();
-    const result = await executeGoogleDriveToolCall(personalConnectorOwner("user-1"), "google_drive_update_file", { file_id: "file-1", name: "Changed" }, s.db);
+    const item = await approval(s.db, "google_drive_update_file", { file_id: "file-1", name: "Changed" });
+    const readsBeforeExecute = calls.length;
+    const result = await executeApprovedGoogleDriveCall(personalConnectorOwner("user-1"), item, s.db);
     expect(result.event.status).toBe("ok");
     expect(mutations()).toHaveLength(1);
-    expect(calls.length - mutations().length).toBe(1);
+    expect(calls.length - readsBeforeExecute - mutations().length).toBe(1);
   });
 
   it("discovers all write tools only with a full grant, honoring settings", async () => {
@@ -144,7 +148,7 @@ describe("Drive write access", () => {
     expect(await names()).toHaveLength(11);
     expect(await getGoogleDriveStatus(personalConnectorOwner("user-1"), s.db)).toMatchObject({
       writeEnabled: true,
-      requireWriteApproval: false,
+      requireWriteApproval: true,
       grantId: "grant-1",
     });
     await setGoogleDriveToolEnabled(
@@ -274,11 +278,12 @@ describe("Drive write HTTP operations", () => {
     "executes %s using the bounded Drive transport",
     async (name, args, method, path) => {
       if (name === "google_drive_restore_file") current.trashed = true;
-      const result = await executeGoogleDriveToolCall(
+      const s = store();
+      const item = await approval(s.db, name, args);
+      const result = await executeApprovedGoogleDriveCall(
         personalConnectorOwner("user-1"),
-        name,
-        args,
-        store().db,
+        item,
+        s.db,
       );
       expect(result.event.status).toBe("ok");
       expect(mutations()).toHaveLength(1);
@@ -316,13 +321,17 @@ describe("Drive write HTTP operations", () => {
 
   it("refuses content replacement for binary and spreadsheet files", async () => {
     current.mimeType = "application/vnd.google-apps.spreadsheet";
-    const result = await executeGoogleDriveToolCall(
+    // Content-type validation happens while planning the approval, before
+    // any write is possible — so this never reaches executeApprovedGoogleDriveCall.
+    const plan = await planGoogleDriveCall(
       personalConnectorOwner("user-1"),
       "google_drive_replace_file_content",
       { file_id: "file-1", content: "new" },
       store().db,
     );
-    expect(result.event.error).toContain(
+    expect(plan.type).toBe("result");
+    if (plan.type !== "result") throw new Error("Expected a result, not an approval");
+    expect(plan.event.error).toContain(
       "plain-text files and Google Docs only",
     );
     expect(mutations()).toEqual([]);
@@ -331,15 +340,16 @@ describe("Drive write HTTP operations", () => {
   it.each([403, 412, 500, "timeout"])(
     "reports %s without retrying or exposing Google error bodies",
     async (status) => {
+      const s = store();
+      const item = await approval(s.db, "google_drive_trash_file", { file_id: "file-1" });
       writeResponse = () => {
         if (status === "timeout") throw new Error("private transport details");
         return new Response("private Google error", { status: Number(status) });
       };
-      const result = await executeGoogleDriveToolCall(
+      const result = await executeApprovedGoogleDriveCall(
         personalConnectorOwner("user-1"),
-        "google_drive_trash_file",
-        { file_id: "file-1" },
-        store().db,
+        item,
+        s.db,
       );
       expect(result.event.status).toBe("error");
       expect(result.content).not.toContain("private");

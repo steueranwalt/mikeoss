@@ -25,10 +25,10 @@ const send = {
   },
 };
 
-it.each([false, true])("dispatches Drive writes with approval required: %s", async (requiresApproval) => {
+it.each([false, true])("Gate B4: dispatches Drive writes as an approval regardless of the stored require_write_approval=%s", async (storedRequireWriteApproval) => {
   const store = driveDb({ tokenRow: {
     user_id: "u1", grant_id: "drive-grant", scope: "https://www.googleapis.com/auth/drive",
-    require_write_approval: requiresApproval, expires_at: "2099-01-01",
+    require_write_approval: storedRequireWriteApproval, expires_at: "2099-01-01",
     ...(await encryptFields("access_token", "test-token")),
   } });
   const fetchMock = vi.fn(async () => Response.json({ id: "folder-created" }));
@@ -41,12 +41,8 @@ it.each([false, true])("dispatches Drive writes with approval required: %s", asy
     undefined, undefined, undefined, undefined,
     { connectorApprovals: true },
   );
-  expect(fetchMock).toHaveBeenCalledTimes(requiresApproval ? 0 : 1);
-  if (requiresApproval) {
-    expect(result.askInputsEvents[0].items[0]).toMatchObject({ kind: "approval", tool_name: "google_drive_create_folder", binding: { provider: "google-drive", grant_id: "drive-grant" } });
-  } else {
-    expect(result.mcpEvents[0]).toMatchObject({ status: "ok", connector_name: "Google Drive" });
-  }
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(result.askInputsEvents[0].items[0]).toMatchObject({ kind: "approval", tool_name: "google_drive_create_folder", binding: { provider: "google-drive", grant_id: "drive-grant" } });
 });
 
 async function gmailStore(requireWriteApproval: boolean) {
@@ -98,8 +94,8 @@ async function dispatch(
   return { result, stream: write.mock.calls.map((c) => c[0]).join("") };
 }
 
-it("runs reads and writes directly when the connection does not ask for permission", async () => {
-  const { store, fetchMock } = await gmailStore(false);
+it("Gate B4: a read runs, a write pauses for approval, and a forged approval tool name is refused", async () => {
+  const { store, fetchMock } = await gmailStore(true);
   const { result, stream } = await dispatch(
     store,
     [
@@ -121,10 +117,15 @@ it("runs reads and writes directly when the connection does not ask for permissi
     ],
     true,
   );
-  expect(fetchMock).toHaveBeenCalledTimes(2);
-  expect(String(fetchMock.mock.calls[1][0])).toContain("/messages/send");
-  expect(result.mcpEvents.map((e) => e.status)).toEqual(["ok", "ok", "error"]);
-  expect(result.askInputsEvents).toEqual([]);
+  // Only the read reached Gmail; the send paused for approval instead of
+  // running, and there is no "gmail_approve" tool that could forge one.
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(result.mcpEvents.map((e) => e.status)).toEqual(["ok", "error"]);
+  expect(result.askInputsEvents).toHaveLength(1);
+  expect(result.askInputsEvents[0].items[0]).toMatchObject({
+    kind: "approval",
+    tool_name: "gmail_send",
+  });
   expect(stream).toContain("mcp_tool_result");
 });
 
