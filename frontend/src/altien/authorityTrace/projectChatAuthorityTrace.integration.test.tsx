@@ -122,7 +122,7 @@ vi.mock("@/altien/authorityTrace/AuthorityTracePanel", () => ({
 }));
 
 vi.mock("@/app/components/assistant/ChatInput", () => ({
-    ChatInput: forwardRef(() => <div>Chat input</div>),
+    ChatInput: forwardRef(function ChatInput() { return <div>Chat input</div>; }),
 }));
 
 vi.mock("@/shared/ui/MikeIconUI", () => ({

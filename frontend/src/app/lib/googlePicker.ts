@@ -108,14 +108,16 @@ export async function openGoogleDrivePicker({
     const picker = await loadGooglePicker();
     assertCurrent();
     return new Promise((resolve, reject) => {
-        let instance: { setVisible(visible: boolean): void } | undefined;
+        // `cancel` closes over `instance` before it is assigned below; it is
+        // only ever invoked later (via the abort listener or the picker's
+        // own callback), by which point the assignment has already run.
         const cancel = () => { instance?.setVisible(false); reject(Object.assign(new Error("Picker owner changed"), { name: "AbortError" })); };
         signal?.addEventListener("abort", cancel, { once: true });
         const finish = (files: PickedDriveFile[]) => { signal?.removeEventListener("abort", cancel); resolve(files); };
         const view = new picker.DocsView(picker.ViewId.DOCS)
             .setIncludeFolders(true)
             .setSelectFolderEnabled(false);
-        instance = new picker.PickerBuilder()
+        const instance = new picker.PickerBuilder()
             .setOAuthToken(accessToken)
             .setDeveloperKey(developerKey)
             .setAppId(appId)
