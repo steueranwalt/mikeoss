@@ -681,3 +681,73 @@ export async function getFileStreamSource(
             await checkAiDraftConfirmation(documentId, confirmToken, db, active.id),
     };
 }
+
+/**
+ * Gate B4 audit finding N30 (preliminary): a display-only exception so the
+ * EditCard can show Tracked Changes inline. Not an export: callers must not
+ * offer download from these bytes, and the route refuses download/confirm
+ * query parameters. Limited to docx with unresolved KI status.
+ */
+export async function getTrackedChangesPreviewSource(
+    documentId: string,
+    userId: string,
+    userEmail: string | undefined,
+    versionIdParam: string | null,
+    db: Db,
+): Promise<
+    | {
+          ok: true;
+          storagePath: string;
+          fileType: string | null;
+          size: number;
+          filename: string;
+      }
+    | { ok: false; kind: "not_found"; detail: string }
+    | { ok: false; kind: "unsupported"; detail: string }
+> {
+    const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
+    if (!access.ok) return { ok: false, kind: "not_found", detail: "Document not found" };
+
+    const active = await loadActiveVersion(documentId, db, versionIdParam);
+    if (!active) return { ok: false, kind: "not_found", detail: "No file available" };
+
+    const confirmation = await checkAiDraftConfirmation(
+        documentId,
+        undefined,
+        db,
+        active.id,
+    );
+    if (!confirmation.state) {
+        return { ok: false, kind: "not_found", detail: "No file available" };
+    }
+
+    const fileType = (active.file_type ?? "").trim().toLowerCase();
+    const filename = (active.filename ?? "").trim().toLowerCase();
+    const isDocx =
+        fileType === "docx" ||
+        fileType === "doc" ||
+        filename.endsWith(".docx") ||
+        filename.endsWith(".doc");
+    if (!isDocx) {
+        return {
+            ok: false,
+            kind: "unsupported",
+            detail: "Tracked-changes preview is limited to Word documents.",
+        };
+    }
+
+    const metadata = await headFile(active.storage_path);
+    if (!metadata) return { ok: false, kind: "not_found", detail: "Document bytes not available" };
+
+    return {
+        ok: true,
+        storagePath: active.storage_path,
+        fileType: active.file_type,
+        size: metadata.size,
+        filename: downloadFilenameForVersion(
+            active.filename,
+            active.version_number,
+            active.source === "assistant_edit",
+        ),
+    };
+}

@@ -86,6 +86,7 @@ import {
     getDocumentAiStatus,
     getDocumentFile,
     getDocumentFileUrl,
+    getTrackedChangesPreviewUrl,
     getDocumentUrl,
     getConfiguredModels,
     getLibrary,
@@ -2260,6 +2261,9 @@ describe("query and payload defaults", () => {
         );
         expect(getDocumentFileUrl("d 1", "v 1")).toBe(
             `${API_BASE}/single-documents/d%201/file?version_id=v%201&purpose=display`,
+        );
+        expect(getTrackedChangesPreviewUrl("d 1", "v 1")).toBe(
+            `${API_BASE}/single-documents/d%201/tracked-changes-preview?version_id=v%201`,
         );
 
         fetchMock

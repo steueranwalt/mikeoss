@@ -384,6 +384,34 @@ it.each([
     },
 );
 
+it("keeps the editor on the tracked-changes preview for open KI edits (N30 preliminary)", () => {
+    render(
+        <DocumentContent
+            showToolbarToggle
+            canEdit
+            document={{
+                ...panelDocumentFromCitation(citation),
+                unresolved_ai: true,
+                version_id: "v1",
+            }}
+            mode={{
+                kind: "edit",
+                edit,
+                changeNumber: 3,
+                onResolved,
+                onResolveStart: onStart,
+            }}
+            active
+            onCloseAnnotation={onClose}
+        />,
+    );
+    expect(screen.getByText("DOCX canvas")).toBeVisible();
+    expect(screen.queryByText("PDF canvas")).toBeNull();
+    expect(viewerProps().displayUrl).toContain("tracked-changes-preview");
+    expect(viewerProps().cacheBytes).toBe(false);
+    expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+});
+
 it("queries the server for AI status when the panel document omitted the flags (N30/N31)", async () => {
     loadAiStatus.mockResolvedValue({ ai_draft: false, unresolved_ai: true });
     render(

@@ -3079,6 +3079,20 @@ export function getDocumentFileUrl(
 }
 
 /**
+ * Gate B4 audit finding N30 (preliminary): display-only Tracked Changes
+ * preview. Not an export — DocxView is the only consumer.
+ */
+export function getTrackedChangesPreviewUrl(
+    documentId: string,
+    versionId?: string | null,
+): string {
+    const params = versionId
+        ? `?version_id=${encodeURIComponent(versionId)}`
+        : "";
+    return `${API_BASE}/single-documents/${encodeURIComponent(documentId)}/tracked-changes-preview${params}`;
+}
+
+/**
  * The actual "download this document" action — unlike getDocumentFileUrl
  * this is an export, and the backend may answer 409 (code
  * "unresolved_ai_edits" or "stamping_failed") when the document has

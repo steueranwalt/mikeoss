@@ -18,6 +18,7 @@ import { useResolvedPanelDocument } from "../assistant/useResolvedPanelDocument"
 import {
     approveAiDraftVersion,
     getDocumentAiStatus,
+    getTrackedChangesPreviewUrl,
     type DocumentVersion,
 } from "@/app/lib/mikeApi";
 import { DocumentTitleRow } from "./DocumentTitleRow";
@@ -196,13 +197,28 @@ export function DocumentContent({
         (isUnresolvedAi || mode.kind === "edit") &&
         approvedDraftKey !== draftKey &&
         !!versionId;
-    const useStampedPdfViewer =
-        isUnresolvedAi && approvedDraftKey !== draftKey && !!versionId;
     const isCase = resolvedDocument.type === "case";
     const viewType = resolveDocumentViewType({
         filename: resolvedDocument.title,
         fileType: resolvedDocument.type,
     });
+    // Gate B4 N30 (preliminary, pending Nils): EditCard inline Tracked
+    // Changes needs the live docx, not the stamped PDF. Dedicated preview
+    // route; no download/export path; bytes stay inside DocxView.
+    const useTrackedChangesPreview =
+        isUnresolvedAi &&
+        mode.kind === "edit" &&
+        viewType === "docx" &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
+    const useStampedPdfViewer =
+        isUnresolvedAi &&
+        !useTrackedChangesPreview &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
+    const trackedChangesPreviewUrl = useTrackedChangesPreview
+        ? getTrackedChangesPreviewUrl(documentId, versionId)
+        : null;
     const citation = mode.kind === "citation" ? mode.citation : null;
     const firstSelectableQuoteIndex =
         mode.kind === "citation"
@@ -392,9 +408,16 @@ export function DocumentContent({
                     />
                 ) : viewType === "docx" ? (
                     <DocxView
-                        onDownloadReady={handleDownloadReady}
+                        onDownloadReady={
+                            useTrackedChangesPreview
+                                ? undefined
+                                : handleDownloadReady
+                        }
                         onSaveStateChange={onSaveStateChange}
-                        cacheBytes={cacheBytes}
+                        cacheBytes={
+                            useTrackedChangesPreview ? false : cacheBytes
+                        }
+                        displayUrl={trackedChangesPreviewUrl}
                         refetchKey={refetchKey}
                         onCloseGuardReady={onCloseGuardReady}
                         defaultMode="edit"

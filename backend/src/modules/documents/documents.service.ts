@@ -31,6 +31,7 @@ export {
     resolveZipExportDocuments,
     getDownloadUrl,
     getFileStreamSource,
+    getTrackedChangesPreviewSource,
 } from "./documents.download";
 
 export {

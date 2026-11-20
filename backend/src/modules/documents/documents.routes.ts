@@ -27,6 +27,7 @@ import {
     resolveZipExportDocuments,
     getDownloadUrl,
     getFileStreamSource,
+    getTrackedChangesPreviewSource,
     listVersions,
     createVersionFromDocument,
     renameVersion,
@@ -244,6 +245,68 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
     res.setHeader(
         "Content-Disposition",
         buildContentDisposition("inline", filename),
+    );
+    res.setHeader("Content-Length", result.size);
+    const source = createFileReadStream(result.storagePath);
+    try {
+        await pipeline(source, res);
+    } catch (error) {
+        source.destroy();
+        if (!res.headersSent && !res.destroyed) {
+            return void sendInternalError(res, error);
+        }
+    }
+}));
+
+// GET /single-documents/:documentId/tracked-changes-preview
+// Gate B4 audit finding N30 (preliminary, pending Nils): display-only
+// exception so the EditCard can render Tracked Changes. Banner +
+// Cache-Control: no-store. Not a download: download/confirm query
+// parameters are refused, and the bytes are not stamped (stamping would
+// drop the markup the editor needs).
+documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRoute(async (req, res) => {
+    if (
+        req.query.download === "1" ||
+        req.query.download === "true" ||
+        typeof req.query.confirm_token === "string"
+    ) {
+        return void res.status(400).json({
+            detail: "Tracked-changes preview is display-only and cannot be downloaded.",
+        });
+    }
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const versionIdParam =
+        typeof req.query.version_id === "string" ? req.query.version_id : null;
+    const db = createServerSupabase();
+
+    const result = await getTrackedChangesPreviewSource(
+        documentId,
+        userId,
+        userEmail,
+        versionIdParam,
+        db,
+    );
+    if (!result.ok) {
+        switch (result.kind) {
+            case "unsupported":
+                return void res.status(409).json({ detail: result.detail });
+            case "not_found":
+                return void res.status(404).json({ detail: result.detail });
+            default: {
+                const exhaustive: never = result;
+                return void sendInternalError(res, exhaustive);
+            }
+        }
+    }
+
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Mike-Ai-Draft", "1");
+    res.setHeader("Content-Type", contentTypeForDocumentType(result.fileType));
+    res.setHeader(
+        "Content-Disposition",
+        buildContentDisposition("inline", result.filename),
     );
     res.setHeader("Content-Length", result.size);
     const source = createFileReadStream(result.storagePath);
