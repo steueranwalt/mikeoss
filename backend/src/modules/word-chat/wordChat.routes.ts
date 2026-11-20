@@ -125,10 +125,13 @@ function parseEditApplyMode(
   if (value === undefined || value === null || value === "approval") {
     return { ok: true, value: "approval" };
   }
-  if (value === "direct") return { ok: true, value: "direct" };
+  // Gate B4 audit finding L2: "direct" (apply without review) is no longer
+  // an accepted value at all — migration 0177 drops the database's own
+  // support for it too, so rejecting it here and there are the same rule in
+  // two places, not a client-side-only restriction.
   return {
     ok: false,
-    detail: 'edit_apply_mode must be "direct" or "approval"',
+    detail: 'edit_apply_mode must be "approval"; direct apply is no longer available (Gate B4)',
   };
 }
 

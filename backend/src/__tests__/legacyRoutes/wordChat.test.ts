@@ -279,6 +279,26 @@ describe("Word chat history routes", () => {
     expect(wordQueries()).toEqual([]);
   });
 
+  // Gate B4 audit finding L2/L5d: apply_mode "direct" (apply without review)
+  // is no longer accepted — only "approval" is.
+  it("rejects apply_mode: direct before querying the message (L5d)", async () => {
+    const res = await request(makeApp())
+      .put(
+        `/api/word-chat/messages/${MESSAGE_ID}/edits/0?document_id=${DOCUMENT_ID}`,
+      )
+      .set(...AUTH)
+      .send({
+        original_text: "ten days",
+        replacement_text: "five days",
+        formats: [],
+        apply_mode: "direct",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.detail).toMatch(/approval/i);
+    expect(wordQueries()).toEqual([]);
+  });
+
   it("rejects normalized edit anchors longer than the Word protocol limit", async () => {
     const res = await request(makeApp())
       .put(

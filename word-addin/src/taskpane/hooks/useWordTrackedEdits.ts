@@ -825,21 +825,6 @@ export function useWordTrackedEdits({
     ],
   );
 
-  const scheduleDirectEdit = useCallback(
-    (
-      messageId: string,
-      editIndex: number,
-      edit: RedlineEdit,
-      persistent: boolean,
-    ): void => {
-      const key = getEditKey(messageId, editIndex);
-      if (scheduledEditKeysRef.current.has(key)) return;
-      scheduledEditKeysRef.current.add(key);
-      beginApplyingEdit(key, edit, persistent, false, "direct");
-    },
-    [beginApplyingEdit],
-  );
-
   const scheduleReviewEdit = useCallback(
     (
       messageId: string,
@@ -939,12 +924,13 @@ export function useWordTrackedEdits({
   /**
    * One apply_word_edits batch, run through the ordinary card lifecycle.
    *
-   * Nothing here is special-cased for tools: Review mode validates and
-   * settles each card on "ready", Edit mode applies a tracked change, and
-   * both persist through the same PUT/PATCH rows as a streamed edit. The
-   * only addition is reading each card's settled status back out so the
-   * caller can post the truth to the awaiting model — which is the whole
-   * point of the client tool loop.
+   * Nothing here is special-cased for tools: every edit validates and
+   * settles on "ready" through the same review lifecycle (Gate B4 audit
+   * finding L2 removed the unreviewed "direct" apply path this used to
+   * branch on) and persists through the same PUT/PATCH rows as a streamed
+   * edit. The only addition is reading each card's settled status back out
+   * so the caller can post the truth to the awaiting model — which is the
+   * whole point of the client tool loop.
    */
   const applyToolEdits = useCallback(
     async (
@@ -952,16 +938,14 @@ export function useWordTrackedEdits({
       items: WordToolEditItem[],
       persistent: boolean,
     ): Promise<WordToolEditOutcome[]> => {
-      const mode = applyModeRef.current;
+      // Gate B4 audit finding L2: direct (unreviewed) apply no longer
+      // exists — applyModeRef.current is always "approval" — so every
+      // batch goes through the review lifecycle unconditionally.
       const keys = items.map(({ blockIndex }) =>
         getEditKey(messageId, blockIndex),
       );
       items.forEach(({ blockIndex, edit }) => {
-        if (mode === "direct") {
-          scheduleDirectEdit(messageId, blockIndex, edit, persistent);
-        } else {
-          scheduleReviewEdit(messageId, blockIndex, edit, persistent);
-        }
+        scheduleReviewEdit(messageId, blockIndex, edit, persistent);
       });
       // Every scheduler registers its job synchronously, so the batch's jobs
       // are all present by the time this reads them.
@@ -1046,7 +1030,7 @@ export function useWordTrackedEdits({
         }
       });
     },
-    [scheduleDirectEdit, scheduleReviewEdit],
+    [scheduleReviewEdit],
   );
 
   const waitForMessageEdits = useCallback(
@@ -1078,24 +1062,12 @@ export function useWordTrackedEdits({
         if (!edit.sealed) return;
         const sealedEdit = toRedlineEdit(edit);
         if (!sealedEdit) return;
-        if (applyModeRef.current === "direct") {
-          scheduleDirectEdit(
-            messageId,
-            edit.blockIndex,
-            sealedEdit,
-            persistent,
-          );
-        } else {
-          scheduleReviewEdit(
-            messageId,
-            edit.blockIndex,
-            sealedEdit,
-            persistent,
-          );
-        }
+        // Gate B4 audit finding L2: direct (unreviewed) apply no longer
+        // exists, so a sealed streamed edit always goes through review.
+        scheduleReviewEdit(messageId, edit.blockIndex, sealedEdit, persistent);
       });
     },
-    [commitEditState, scheduleDirectEdit, scheduleReviewEdit],
+    [commitEditState, scheduleReviewEdit],
   );
 
   const markIncompleteRedlines = useCallback(
