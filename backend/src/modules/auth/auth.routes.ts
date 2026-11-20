@@ -24,6 +24,7 @@ import {
 import { ssoConfiguration, ssoDomainSchema } from "../../lib/ssoConfig";
 import { readServerSession } from "../../lib/serverSession";
 import { authProvider, credentialsSchema, signupSchema, passwordSchema } from "./auth.service";
+import { CLIENT_ASSERTION_TYPE, federatedClientAssertion } from "../../lib/auth/providers/entraClientAssertion";
 
 import { describeAuthProviderError, describeAuthValidationIssues } from "./auth.messages";
 
@@ -86,7 +87,10 @@ function safeReturnUrl(raw: unknown): string {
 async function entraConfiguration(req: Request, word = false) {
   const [tenantId, clientId, clientSecret, backendId, publicUrl] = await Promise.all([
     getConfig("entra-tenant-id"), getConfig("entra-client-id"),
-    getConfig("entra-client-secret"), getConfig("entra-backend-client-id"),
+    // A deployment that only uses the federated-credential (managed
+    // identity) path never configures this secret; missing Key Vault config
+    // for it must not fail the whole login flow. See entraClientAssertion.ts.
+    getConfig("entra-client-secret").catch(() => ""), getConfig("entra-backend-client-id"),
     getConfig("backend-public-url").catch(() => ""),
   ]);
   if (!tenantId || !clientId || !backendId) throw new Error("Entra OpenID configuration is unavailable");
@@ -99,13 +103,25 @@ async function entraConfiguration(req: Request, word = false) {
   };
 }
 
-export function buildEntraTokenForm(
+// Federated credential (managed identity, no stored secret) takes precedence
+// over a configured client secret. A deployment with no Federated Identity
+// Credential set up on its app registration simply never gets a token back
+// for the reserved audience (see entraClientAssertion.ts) and falls through
+// to client_secret unchanged — this keeps every existing client-secret
+// deployment working without an opt-in flag.
+export async function buildEntraTokenForm(
   creds: { clientId: string; clientSecret?: string; scopes: string },
   grant: { grant_type: "authorization_code"; code: string; redirect_uri: string; code_verifier?: string }
     | { grant_type: "refresh_token"; refresh_token: string },
-): URLSearchParams {
+): Promise<URLSearchParams> {
   const form = new URLSearchParams({ client_id: creds.clientId, scope: creds.scopes, ...grant });
-  if (creds.clientSecret) form.set("client_secret", creds.clientSecret);
+  const assertion = await federatedClientAssertion();
+  if (assertion) {
+    form.set("client_assertion_type", CLIENT_ASSERTION_TYPE);
+    form.set("client_assertion", assertion);
+  } else if (creds.clientSecret) {
+    form.set("client_secret", creds.clientSecret);
+  }
   return form;
 }
 
@@ -113,7 +129,7 @@ async function exchangeEntraCode(req: Request, code: string, verifier: string, w
   const cfg = await entraConfiguration(req, word);
   const response = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(cfg.tenantId)}/oauth2/v2.0/token`, {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: buildEntraTokenForm({ clientId: cfg.clientId, clientSecret: cfg.clientSecret, scopes: cfg.scopes }, {
+    body: await buildEntraTokenForm({ clientId: cfg.clientId, clientSecret: cfg.clientSecret, scopes: cfg.scopes }, {
       grant_type: "authorization_code", code, redirect_uri: cfg.redirectUri, code_verifier: verifier,
     }), signal: AbortSignal.timeout(15_000),
   });

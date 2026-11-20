@@ -116,7 +116,7 @@ const ENV_VAR_DEFS: EnvVarDef[] = [
   { name: "ENTRA_BACKEND_CLIENT_ID", description: "Client ID of the Backend API app registration.", category: "Entra", required: "entra", isSecret: false },
   { name: "ENTRA_BACKEND_SCOPE", description: "Full scope string the web client requests, of the form api://CLIENT_ID/access_as_user.", category: "Entra", required: "entra", isSecret: false },
   { name: "ENTRA_CLIENT_ID", description: "Client ID of the Web Login app registration.", category: "Entra", required: "entra", isSecret: false },
-  { name: "ENTRA_CLIENT_SECRET", description: "Client secret on the Web Login app registration.", category: "Entra", required: "entra", isSecret: true },
+  { name: "ENTRA_CLIENT_SECRET", description: "Client secret on the Web Login app registration. Not needed when a Federated Identity Credential trusts this deployment's managed identity (AZURE_CLIENT_ID) instead — see docs/entraId/federated-credential-login.md.", category: "Entra", required: "entra", isSecret: true },
   { name: "ENTRA_REDIRECT_URI", description: "OpenID redirect URI; must match the Web Login app reg exactly. Path is /api/auth/openid-callback/microsoft.", category: "Entra", required: "entra", isSecret: false },
   { name: "TENANT_ONBOARDING_MODE", description: "auto = first sign-in inserts a tenants row automatically; manual = denies until row exists.", category: "Entra", required: "entra", isSecret: false },
   { name: "ENTRA_ADMIN_GROUP_IDS", description: "Comma-separated Entra group OIDs whose members get the TenantAdmin role.", category: "Entra", required: "entra", isSecret: false },
@@ -173,9 +173,16 @@ function evaluateEnvVar(def: EnvVarDef, provider: string): EnvVarStatus {
     display = isSet ? (raw as string) : "(not set)";
   }
 
+  // A federated-credential (managed identity) login never sets this var —
+  // see entraClientAssertion.ts. AZURE_CLIENT_ID (the user-assigned MI this
+  // Container App runs as) is the best available signal here; this endpoint
+  // only inspects raw env vars and cannot itself ask Entra whether a
+  // Federated Identity Credential trusting that MI actually exists.
+  const federatedCredentialLikely = def.name === "ENTRA_CLIENT_SECRET" && !!process.env.AZURE_CLIENT_ID;
+
   let status: EnvVarStatus["status"];
   if (def.required === "always" && !isSet) status = "missing";
-  else if (def.required === "entra" && provider === "entra" && !isSet) status = "missing";
+  else if (def.required === "entra" && provider === "entra" && !isSet && !federatedCredentialLikely) status = "missing";
   else if (!isSet) status = "optional";
   else status = "ok";
 

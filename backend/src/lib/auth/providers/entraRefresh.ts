@@ -1,4 +1,5 @@
 import { getConfig } from "../../config";
+import { CLIENT_ASSERTION_TYPE, federatedClientAssertion } from "./entraClientAssertion";
 
 /** Refresh a server-held Entra credential. Never expose the refresh token to JS. */
 export async function renewEntraCredential(refreshToken: string): Promise<{
@@ -9,20 +10,32 @@ export async function renewEntraCredential(refreshToken: string): Promise<{
   const [tenantId, clientId, clientSecret, backendId] = await Promise.all([
     getConfig("entra-tenant-id"),
     getConfig("entra-client-id"),
-    getConfig("entra-client-secret"),
+    // See entraConfiguration() in auth.routes.ts: optional once a federated
+    // credential is configured.
+    getConfig("entra-client-secret").catch(() => ""),
     getConfig("entra-backend-client-id"),
   ]);
   const scope = process.env.ENTRA_AUTH_SCOPES || `openid profile email offline_access api://${backendId}/access_as_user`;
+  // Same federated-credential-first, client-secret-fallback precedence as
+  // the authorization_code exchange in auth.routes.ts — see
+  // entraClientAssertion.ts for why this never needs a feature flag.
+  const assertion = await federatedClientAssertion();
+  const form = new URLSearchParams({
+    client_id: clientId,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    scope,
+  });
+  if (assertion) {
+    form.set("client_assertion_type", CLIENT_ASSERTION_TYPE);
+    form.set("client_assertion", assertion);
+  } else if (clientSecret) {
+    form.set("client_secret", clientSecret);
+  }
   const response = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      scope,
-    }),
+    body: form,
     signal: AbortSignal.timeout(15_000),
   });
   const body = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number };
