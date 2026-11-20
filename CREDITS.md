@@ -80,6 +80,12 @@ infrastructure, and development workflow, including optional local integrations.
 | [OpenNext](https://opennext.js.org/) | Cloudflare deployment support for the web app. |
 | [Office Add-in tooling](https://github.com/OfficeDev/Office-Addin-Scripts) | Local development and debugging for the Word add-in. |
 
+## Related forks
+
+| Project | Relationship |
+| --- | --- |
+| [Emilie](https://github.com/veronica-builds/emilie) by Veronica Lopez | An independent AGPL-3.0 fork of Mike focused on an MCP client, local/self-hosted model routing, and Swiss open legal data sources. This repository's documentation of local-model configuration and example Swiss legal data connectors (see [`docs/emilie-integration.md`](docs/emilie-integration.md)) was informed by Emilie's public README; no Emilie source code was copied. |
+
 ## Dependency details
 
 We also thank the authors of the many supporting and transitive dependencies

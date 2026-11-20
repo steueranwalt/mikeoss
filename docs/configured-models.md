@@ -49,6 +49,32 @@ array:
 | `maxTokensField` | no | Output-token request field: `max_tokens` (default) or `max_completion_tokens`. |
 | `replayReasoning` | no | Send each earlier assistant turn's stored reasoning back as `reasoning_content`. Default `false`. See [Reasoning replay](#reasoning-replay). |
 
+### Example: a self-hosted Apertus endpoint
+
+[Apertus](https://ethz.ch/en/news-and-events/eth-news/news/2025/09/apertus-a-fully-open-transparent-multilingual-language-model.html)
+is an openly licensed Swiss LLM. A deployment that serves it locally through
+vLLM (or another OpenAI-compatible server) declares it the same way as any
+other self-hosted model, with no code change:
+
+```json
+{
+  "id": "apertus-70b",
+  "label": "Apertus 70B (local)",
+  "provider": "openai-compatible",
+  "location": "local",
+  "baseUrl": "http://localhost:8000/v1",
+  "tolerateTextToolCalls": true
+}
+```
+
+`baseUrl` is a placeholder; point it at the operator's own vLLM/inference
+host. `tolerateTextToolCalls` is recommended for Apertus and other
+non-frontier local models that describe tool calls as prose instead of
+emitting structured tool calls (see [Tool-call tolerance](#tool-call-tolerance)
+below). No API key is needed for a local endpoint that does not require one.
+See [`docs/emilie-integration.md`](emilie-integration.md) for the fuller
+comparison this example came out of.
+
 An entry that declares no key at all is treated as needing none, regardless of
 whether its location is `local` or `cloud`. When a key source is declared but
 does not resolve, the model is omitted from the authenticated model catalog

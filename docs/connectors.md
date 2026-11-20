@@ -139,6 +139,25 @@ Google MCP endpoint paths may be versioned. Use the provider's documented URL;
 for example, the Drive endpoint is
 `https://drivemcp.googleapis.com/mcp/v1`, not `/mcp`.
 
+## Swiss open legal data sources
+
+These free, authentication-free sources are reachable Swiss legal data
+providers that can be added like any other remote server through **+ Custom**:
+
+| Source | Coverage | Auth |
+| --- | --- | --- |
+| [Entscheidsuche](https://entscheidsuche.ch) | Federal and 22 cantonal courts, de/fr/it | None |
+| [OpenCaseLaw.ch](https://opencaselaw.ch) | 971K+ decisions (1875–present), all 26 cantons, citation graph, legislation | None |
+| [Online Kommentar](https://onlinekommentar.ch) | Swiss legal commentaries, article-level, multilingual | None |
+| [Fedlex](https://fedlex.data.admin.ch) | Complete Swiss federal legislation, all three national languages | None |
+
+These were only checked for basic reachability, not for MCP protocol
+conformance or an up-to-date terms-of-use review — verify a source directly
+before enabling it for a workspace. Like every custom connector, requests to
+these servers go through this deployment's SSRF-guarded fetch path (below).
+See [`docs/emilie-integration.md`](emilie-integration.md) for where this list
+comes from.
+
 ## Security and tool controls
 
 - Connector bearer tokens, custom headers, and OAuth tokens are encrypted at
