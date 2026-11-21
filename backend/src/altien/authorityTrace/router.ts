@@ -19,6 +19,22 @@ import { createServerSupabase } from "../../lib/supabase";
 import { withAiDraftFilenamePrefix } from "../../lib/documentVersions";
 import { ZodError } from "zod";
 
+function authorityTraceMemoContentHash(memo: {
+  document_id?: string;
+  filename?: string;
+  segments?: Array<{ text?: string }>;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        document_id: memo.document_id ?? null,
+        filename: memo.filename ?? null,
+        segments: (memo.segments ?? []).map((segment) => segment.text ?? ""),
+      }),
+    )
+    .digest("hex");
+}
+
 function authorityTraceHtmlConfirmToken(
   runId: string,
   kind: "review" | "audit",
@@ -133,8 +149,9 @@ for (const exportType of ["review", "audit"] as const) {
             ? workspace.memo.version_id
             : null;
         // A memo without version_id must not mint a token bound only to
-        // run_id/kind. Bind the confirmation to the run id instead.
-        const versionId = memoVersionId ?? run.id;
+        // run_id/kind. Bind the confirmation to the memo's content hash.
+        const versionId =
+          memoVersionId ?? authorityTraceMemoContentHash(workspace.memo);
         const expectedToken = authorityTraceHtmlConfirmToken(
           run.id,
           exportType,

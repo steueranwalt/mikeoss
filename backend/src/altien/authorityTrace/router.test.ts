@@ -369,7 +369,7 @@ describe("Authority Trace HTML exports", () => {
     expect(downloaded.text).toContain("KI-Entwurf, nicht freigegeben");
   });
 
-  it("binds a memo without version_id to the run id instead of minting an unbound token", async () => {
+  it("binds a memo without version_id to the memo content hash instead of minting an unbound token (N49)", async () => {
     getCitationVerificationRunMock.mockResolvedValue({
       id: "run-1",
       project_id: "project-1",
@@ -379,14 +379,25 @@ describe("Authority Trace HTML exports", () => {
     delete (workspace.memo as { version_id?: string }).version_id;
     getAuthorityTraceWorkspaceMock.mockResolvedValue(workspace);
 
+    const { createHash } = await import("node:crypto");
+    const memoHash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          document_id: workspace.memo.document_id ?? null,
+          filename: workspace.memo.filename ?? null,
+          segments: workspace.memo.segments.map((segment) => segment.text),
+        }),
+      )
+      .digest("hex");
+
     const blocked = await request(makeApp())
       .get("/api/authority-trace/runs/run-1/review.html?download=1")
       .set("Authorization", "Bearer valid-token");
     expect(blocked.status).toBe(409);
-    expect(blocked.body.version_id).toBe("run-1");
+    expect(blocked.body.version_id).toBe(memoHash);
+    expect(blocked.body.version_id).not.toBe("run-1");
     expect(typeof blocked.body.confirm_token).toBe("string");
 
-    const { createHash } = await import("node:crypto");
     const unbound = createHash("sha256")
       .update(JSON.stringify({ run_id: "run-1", kind: "review", ai_draft: true }))
       .digest("hex");
