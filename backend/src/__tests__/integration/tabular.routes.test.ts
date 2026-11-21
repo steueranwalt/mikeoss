@@ -921,12 +921,14 @@ describe("tabular.routes", () => {
                 .set(...AUTH);
 
             expect(res.status).toBe(200);
+            expect(res.body.ai_draft).toBe(true);
             expect(res.body.review).toMatchObject({
                 id: "r1",
                 is_owner: true,
                 is_running: true,
             });
             expect(res.body.cells).toHaveLength(1);
+            expect(res.body.cells[0].ai_draft).toBe(true);
             expect(res.body.documents).toEqual([
                 { id: "d1", current_version_id: null },
             ]);

@@ -787,6 +787,8 @@ export interface TabularCell {
   } | null;
   status: "pending" | "generating" | "done" | "error";
   created_at: string;
+  /** Generated tabular cells are unreviewed AI drafts until the review is approved. */
+  ai_draft?: boolean;
 }
 
 export interface TabularReviewRow {
@@ -927,6 +929,7 @@ export interface TabularReviewDetailOut {
   cells: TabularCell[];
   rows: TabularReviewRow[];
   documents: Document[];
+  ai_draft?: boolean;
   /**
    * A generation the server is running *in this process*: present only while
    * the backend still holds the run's frames, which is what makes it

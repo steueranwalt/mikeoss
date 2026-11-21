@@ -55,6 +55,7 @@ import { AccessModal } from "../modals/AccessModal";
 import { PermissionDeniedPopup } from "../popups/PermissionDeniedPopup";
 import { ApiKeyMissingPopup } from "../popups/ApiKeyMissingPopup";
 import { ConfirmPopup } from "../popups/ConfirmPopup";
+import { AiDraftBanner } from "../shared/AiDraftBanner";
 import { WarningPopup } from "../popups/WarningPopup";
 import { NoModelsWarningPopup } from "../popups/NoModelsWarningPopup";
 import { HeaderActionsMenu } from "../shared/HeaderActionsMenu";
@@ -165,6 +166,7 @@ export function TRView({ reviewId, projectId }: Props) {
     const [applyingWorkflow, setApplyingWorkflow] = useState(false);
     const [deleteReviewConfirmOpen, setDeleteReviewConfirmOpen] =
         useState(false);
+    const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
     const [deleteReviewStatus, setDeleteReviewStatus] = useState<
         "idle" | "deleting" | "deleted"
     >("idle");
@@ -1815,14 +1817,7 @@ export function TRView({ reviewId, projectId }: Props) {
                                                 label: "Export",
                                                 icon: Download,
                                                 onSelect: () =>
-                                                    exportTabularReviewToExcel({
-                                                        reviewTitle:
-                                                            review?.title ||
-                                                            "Tabular Review",
-                                                        columns,
-                                                        rows,
-                                                        cells,
-                                                    }),
+                                                    setExportConfirmOpen(true),
                                                 disabled:
                                                     columns.length === 0 ||
                                                     rows.length === 0,
@@ -1878,6 +1873,7 @@ export function TRView({ reviewId, projectId }: Props) {
                         },
                     ]}
                 />
+                <AiDraftBanner />
 
                 {/* Toolbar + table column, chat panel beside it */}
                 <div className="flex flex-1 overflow-hidden">
@@ -2308,6 +2304,23 @@ export function TRView({ reviewId, projectId }: Props) {
                     "Add workflow",
                 ]}
                 applying={applyingWorkflow}
+            />
+
+            <ConfirmPopup
+                open={exportConfirmOpen}
+                title="Export AI draft?"
+                message="This tabular review contains AI drafts that are not approved. The Excel file will be marked [KI-ENTWURF]."
+                confirmLabel="Export anyway"
+                onCancel={() => setExportConfirmOpen(false)}
+                onConfirm={() => {
+                    setExportConfirmOpen(false);
+                    void exportTabularReviewToExcel({
+                        reviewTitle: review?.title || "Tabular Review",
+                        columns,
+                        rows,
+                        cells,
+                    });
+                }}
             />
 
             <ConfirmPopup

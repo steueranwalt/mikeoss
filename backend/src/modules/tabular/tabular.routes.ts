@@ -303,6 +303,7 @@ tabularRouter.get("/:reviewId", requireAuth, asyncRoute(async (req, res) => {
     const run = await findActiveStreamRun(reviewRunKey(reviewId));
     res.json({
         ...result.data,
+        ai_draft: true,
         active_generation:
             run && !run.finished ? { id: run.id, seq: run.seq } : null,
     });
@@ -428,7 +429,13 @@ tabularRouter.post(
             log: console,
         });
         if (!result.ok) return void sendTabularFailure(res, result);
-        res.status(result.data.status).json(result.data.body);
+        const body = result.data.body;
+        res.status(result.data.status).json({
+            ...(body && typeof body === "object" && !Array.isArray(body)
+                ? (body as Record<string, unknown>)
+                : { content: body }),
+            ai_draft: true,
+        });
     }),
 );
 

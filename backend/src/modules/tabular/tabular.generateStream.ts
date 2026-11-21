@@ -192,6 +192,7 @@ async function tailTabularRun(args: {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
+    res.setHeader("X-Mike-Ai-Draft", "1");
     res.flushHeaders();
 
     const stopHeartbeat = startSseHeartbeat(res);

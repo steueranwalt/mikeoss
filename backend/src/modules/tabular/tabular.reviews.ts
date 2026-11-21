@@ -766,6 +766,7 @@ export async function getTabularReviewDetail(
                 .map((cell) => ({
                     ...cell,
                     content: parseCellContent(cell.content),
+                    ai_draft: true,
                 })),
             rows,
             documents: docs as unknown as Record<string, unknown>[],

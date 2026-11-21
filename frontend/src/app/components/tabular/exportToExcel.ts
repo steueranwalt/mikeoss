@@ -32,6 +32,9 @@ function sanitizeFilename(name: string): string {
     );
 }
 
+export const TABULAR_AI_DRAFT_NOTICE =
+    "Enthält KI-Entwürfe, nicht freigegeben";
+
 export async function exportTabularReviewToExcel(params: {
     reviewTitle: string;
     columns: ColumnConfig[];
@@ -47,6 +50,11 @@ export async function exportTabularReviewToExcel(params: {
     }
 
     const wb = new ExcelJS.Workbook();
+    const notice = wb.addWorksheet("KI-Hinweis");
+    notice.addRow([TABULAR_AI_DRAFT_NOTICE]);
+    notice.addRow(["KI-Entwurf, nicht freigegeben"]);
+    notice.getRow(1).font = { bold: true };
+
     const ws = wb.addWorksheet("Review");
 
     ws.columns = [
@@ -83,7 +91,7 @@ export async function exportTabularReviewToExcel(params: {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${sanitizeFilename(reviewTitle)}.xlsx`;
+    a.download = `[KI-ENTWURF] ${sanitizeFilename(reviewTitle)}.xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();
