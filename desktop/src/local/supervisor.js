@@ -309,8 +309,9 @@ async function startLocalStack(app, status = () => {}) {
 
     // Dev serves the static export and runtime /config from the backend.
     // /login is also a directory (login/sso), so express.static 301s /login
-    // to /login/; treat that redirect as ready, not a failed boot.
-    await waitFor("frontend", () => httpOk(`${FRONTEND_URL}/login`, [200, 301, 302, 307, 308]));
+    // to /login/. Probe the trailing-slash URL and expect 200 — a 301/302 to
+    // an arbitrary Location is not "frontend ready".
+    await waitFor("frontend", () => httpOk(`${FRONTEND_URL}/login/`));
 
     throwIfAborted();
     running = true;
