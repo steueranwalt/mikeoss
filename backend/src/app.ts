@@ -228,7 +228,12 @@ export function buildApp(): express.Express {
         callback(null, !origin || allowedOrigins.has(origin));
       },
       credentials: true,
-      allowedHeaders: ["Authorization", "Content-Type", "X-Upload-Generation"],
+      allowedHeaders: [
+        "Authorization",
+        "Content-Type",
+        "X-Upload-Generation",
+        "X-Mike-Preview-Ticket",
+      ],
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     }),
   );
