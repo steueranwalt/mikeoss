@@ -7,9 +7,13 @@ import {
   PREVIEW_TICKET_HEADER,
   resetPreviewTicketsForTests,
 } from "../../modules/documents/documents.previewTickets";
+import { createMemoryPreviewTicketDb } from "../../modules/documents/__tests__/previewTicketMemoryDb";
 
 const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
+  memoryDb: {
+    current: null as unknown as ReturnType<typeof createMemoryPreviewTicketDb>,
+  },
 }));
 
 vi.mock("../../middleware/auth", () => ({
@@ -28,7 +32,7 @@ vi.mock("../../middleware/auth", () => ({
 }));
 
 vi.mock("../../lib/supabase", () => ({
-  createServerSupabase: vi.fn(() => ({})),
+  createServerSupabase: () => mocks.memoryDb.current,
 }));
 
 vi.mock("../../lib/storage", async (importOriginal) => ({
@@ -48,9 +52,10 @@ app.use(express.json());
 app.use("/single-documents", documentsRouter);
 
 describe("GET /single-documents/:documentId/tracked-changes-preview (N30/N37/N41)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    resetPreviewTicketsForTests();
+    mocks.memoryDb.current = createMemoryPreviewTicketDb();
+    await resetPreviewTicketsForTests(mocks.memoryDb.current as never);
     mocks.preview.mockResolvedValue({
       ok: true,
       storagePath: "documents/user-1/document-1/source.docx",
@@ -169,7 +174,7 @@ describe("GET /single-documents/:documentId/tracked-changes-preview (N30/N37/N41
     const minted = await request(app)
       .post("/single-documents/document-1/tracked-changes-preview/ticket")
       .send({ edit_id: "edit-1" });
-    expirePreviewTicketForTests(minted.body.ticket);
+    await expirePreviewTicketForTests(minted.body.ticket);
 
     const response = await request(app)
       .get("/single-documents/document-1/tracked-changes-preview")

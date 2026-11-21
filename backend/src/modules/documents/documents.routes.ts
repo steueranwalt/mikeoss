@@ -322,12 +322,12 @@ documentsRouter.post("/:documentId/tracked-changes-preview/ticket", requireAuth,
     );
     if (!result.ok) return void previewSourceFailure(res, result);
 
-    const ticket = mintPreviewTicket({
+    const ticket = await mintPreviewTicket({
         userId,
         documentId,
         versionId: result.versionId,
         editId,
-    });
+    }, db);
     res.setHeader("Cache-Control", "no-store");
     res.json({
         ticket,
@@ -347,6 +347,7 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
+    const db = createServerSupabase();
     const ticketHeader = req.get(PREVIEW_TICKET_HEADER)?.trim() ?? "";
     let versionIdParam =
         typeof req.query.version_id === "string" ? req.query.version_id : null;
@@ -354,7 +355,7 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
         typeof req.query.edit_id === "string" ? req.query.edit_id : null;
 
     if (ticketHeader) {
-        const claim = consumePreviewTicket(ticketHeader);
+        const claim = await consumePreviewTicket(ticketHeader, db);
         if (!claim) {
             res.setHeader("Cache-Control", "no-store");
             return void res.status(401).json({
@@ -378,7 +379,6 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
         });
     }
 
-    const db = createServerSupabase();
     const result = await getTrackedChangesPreviewSource(
         documentId,
         userId,

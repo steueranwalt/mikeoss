@@ -25,3 +25,6 @@ pnpm exec vitest run src/__tests__/migrationLedger.db.test.ts --maxWorkers=1
 export MIKE_TEST_POSTGRES_CONTAINER="$container"
 export POSTGRES_PASSWORD=migration-test
 pnpm exec vitest run src/modules/documents/__tests__/documentVersionAiDraftBackfill.postgres.test.ts --maxWorkers=1 --hookTimeout=120000 --testTimeout=120000
+# Gate B4 audit finding N45: mint on replica A / redeem on replica B against
+# the same disposable Postgres, not an in-process Map.
+pnpm exec vitest run src/modules/documents/__tests__/documents.previewTickets.postgres.test.ts --maxWorkers=1 --hookTimeout=120000 --testTimeout=120000
