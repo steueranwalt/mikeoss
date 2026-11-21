@@ -20,15 +20,18 @@ import {
 } from "./types";
 import { DocumentContent, type DocumentContentMode } from "./DocumentContent";
 
-const { viewer, resolveEdit, loadVersions, loadAiStatus } = vi.hoisted(() => ({
-    viewer: vi.fn(),
-    resolveEdit: vi.fn(),
-    loadVersions: vi.fn(),
-    loadAiStatus: vi.fn(),
-}));
+const { viewer, resolveEdit, loadVersions, loadAiStatus, fileRequest } =
+    vi.hoisted(() => ({
+        viewer: vi.fn(),
+        resolveEdit: vi.fn(),
+        loadVersions: vi.fn(),
+        loadAiStatus: vi.fn(),
+        fileRequest: vi.fn(),
+    }));
 vi.mock("./views/DocxView", () => ({
     DocxView: (props: unknown) => {
         viewer(props);
+        fileRequest("/file?purpose=display");
         return <div>DOCX canvas</div>;
     },
 }));
@@ -41,6 +44,7 @@ vi.mock("./views/PdfView", () => ({
 vi.mock("./views/SpreadsheetView", () => ({
     SpreadsheetView: (props: unknown) => {
         viewer(props);
+        fileRequest("/file?purpose=display");
         return <div>Sheet canvas</div>;
     },
 }));
@@ -124,6 +128,9 @@ function content(
 function viewerProps() {
     return viewer.mock.calls.at(-1)![0];
 }
+async function waitForViewer() {
+    await waitFor(() => expect(viewer).toHaveBeenCalled());
+}
 beforeEach(() => {
     vi.clearAllMocks();
     loadAiStatus.mockResolvedValue({ ai_draft: false, unresolved_ai: false });
@@ -136,6 +143,7 @@ describe.each(["assistant", "project"] as const)(
     (surface) => {
         it("offers Edit in both surfaces with their defaults and retains its state per panel", async () => {
             const { rerender } = render(content(surface, { kind: "document" }));
+            await waitForViewer();
             const button = await screen.findByRole("button", { name: "Edit" });
             if (surface === "project") {
                 expect(viewerProps().toolbarVisible).toBe(true);
@@ -164,15 +172,17 @@ describe.each(["assistant", "project"] as const)(
             expect(button).not.toHaveClass("text-foreground");
         });
 
-        it("keeps a DOCX read-only, with no Edit toggle, for a reader", () => {
+        it("keeps a DOCX read-only, with no Edit toggle, for a reader", async () => {
             render(content(surface, { kind: "document" }, true, false));
+            await waitForViewer();
             expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
             expect(viewerProps().toolbarVisible).toBe(false);
         });
 
-        it("shows citation quotes, selects and deselects highlights, and reopens after dismissal", () => {
+        it("shows citation quotes, selects and deselects highlights, and reopens after dismissal", async () => {
             const mode: DocumentContentMode = { kind: "citation", citation };
             const { rerender } = render(content(surface, mode));
+            await waitForViewer();
             expect(screen.getByText(/First clause/)).toBeVisible();
             const annotation = screen.getByRole("region", {
                 name: "Document annotation",
@@ -215,9 +225,10 @@ describe.each(["assistant", "project"] as const)(
             ]);
         });
 
-        it("preserves quote selection while inactive and resets it for another citation", () => {
+        it("preserves quote selection while inactive and resets it for another citation", async () => {
             const mode: DocumentContentMode = { kind: "citation", citation };
             const { rerender } = render(content(surface, mode));
+            await waitForViewer();
             fireEvent.click(screen.getByRole("button", { name: "2" }));
             rerender(content(surface, mode, false));
             expect(viewerProps().quotes).toBeUndefined();
@@ -236,7 +247,7 @@ describe.each(["assistant", "project"] as const)(
             ]);
         });
 
-        it("does not highlight unverified quotes", () => {
+        it("does not highlight unverified quotes", async () => {
             render(
                 content(surface, {
                     kind: "citation",
@@ -252,11 +263,12 @@ describe.each(["assistant", "project"] as const)(
                     },
                 }),
             );
+            await waitForViewer();
             expect(screen.getByRole("button", { name: "View" })).toBeDisabled();
             expect(viewerProps().quotes).toEqual([]);
         });
 
-        it("keeps Download icon-only at narrow and wide widths on both surfaces", () => {
+        it("keeps Download icon-only at narrow and wide widths on both surfaces", async () => {
             let resize: ResizeObserverCallback;
             const disconnect = vi.fn();
             vi.stubGlobal(
@@ -270,6 +282,7 @@ describe.each(["assistant", "project"] as const)(
                 },
             );
             const { unmount } = render(content(surface, { kind: "document" }));
+            await waitForViewer();
             act(() =>
                 resize(
                     [{ contentRect: { width: 400 } } as ResizeObserverEntry],
@@ -299,6 +312,9 @@ describe.each(["assistant", "project"] as const)(
                 download_url: null,
             });
             render(content(surface, { kind: "edit", edit, changeNumber: 3 }));
+            await waitFor(() =>
+                expect(screen.getByText("DOCX canvas")).toBeVisible(),
+            );
             expect(screen.getByText("New wording")).toBeVisible();
             const annotation = screen.getByRole("region", {
                 name: "Document annotation",
@@ -337,7 +353,7 @@ describe.each(["assistant", "project"] as const)(
     },
 );
 
-it("renders an AI draft as the stamped PDF viewer and banner, not the live docx canvas (N17/N24)", () => {
+it("renders an AI draft as the stamped PDF viewer and banner, not the live docx canvas (N17/N24)", async () => {
     render(
         <DocumentContent
             showToolbarToggle
@@ -352,7 +368,7 @@ it("renders an AI draft as the stamped PDF viewer and banner, not the live docx 
             onCloseAnnotation={onClose}
         />,
     );
-    expect(screen.getByText("PDF canvas")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("PDF canvas")).toBeVisible());
     expect(screen.queryByText("DOCX canvas")).toBeNull();
     expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
 });
@@ -362,7 +378,7 @@ it.each([
     { surface: "project" as const, showToolbarToggle: false },
 ])(
     "shows the stamped PDF and banner for pending KI edits without ai_draft on the $surface surface (N30/N17-banner)",
-    ({ showToolbarToggle }) => {
+    async ({ showToolbarToggle }) => {
         render(
             <DocumentContent
                 showToolbarToggle={showToolbarToggle}
@@ -375,16 +391,16 @@ it.each([
                 }}
                 mode={{ kind: "document" }}
                 active
-                onCloseAnnotation={onClose}
-            />,
+            onCloseAnnotation={onClose}
+        />,
         );
-        expect(screen.getByText("PDF canvas")).toBeVisible();
+        await waitFor(() => expect(screen.getByText("PDF canvas")).toBeVisible());
         expect(screen.queryByText("DOCX canvas")).toBeNull();
         expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
     },
 );
 
-it("keeps the editor on the tracked-changes preview for open KI edits (N30/N36)", () => {
+it("keeps the editor on the tracked-changes preview for open KI edits (N30/N36)", async () => {
     render(
         <DocumentContent
             showToolbarToggle
@@ -405,7 +421,7 @@ it("keeps the editor on the tracked-changes preview for open KI edits (N30/N36)"
             onCloseAnnotation={onClose}
         />,
     );
-    expect(screen.getByText("DOCX canvas")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("DOCX canvas")).toBeVisible());
     expect(screen.queryByText("PDF canvas")).toBeNull();
     expect(viewerProps().displayUrl).toContain("tracked-changes-preview");
     expect(viewerProps().displayUrl).toContain("edit_id=edit");
@@ -436,6 +452,44 @@ it("fails closed to stamped display when /ai-status errors (N39)", async () => {
     expect(loadAiStatus).toHaveBeenCalledWith("doc", "v1");
     expect(screen.queryByText("DOCX canvas")).toBeNull();
     expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+});
+
+it("does not request /file until /ai-status settles (N46)", async () => {
+    let resolveStatus!: (value: {
+        ai_draft: boolean;
+        unresolved_ai: boolean;
+    }) => void;
+    loadAiStatus.mockImplementation(
+        () =>
+            new Promise((resolve) => {
+                resolveStatus = resolve;
+            }),
+    );
+    render(
+        <DocumentContent
+            showToolbarToggle
+            canEdit
+            document={{
+                ...panelDocumentFromCitation(citation),
+                version_id: "v1",
+            }}
+            mode={{ kind: "document" }}
+            active
+            onCloseAnnotation={onClose}
+        />,
+    );
+    expect(loadAiStatus).toHaveBeenCalledWith("doc", "v1");
+    expect(fileRequest).not.toHaveBeenCalled();
+    expect(viewer).not.toHaveBeenCalled();
+    expect(
+        screen.getByRole("status", { name: "Loading document" }),
+    ).toBeVisible();
+    expect(screen.queryByText("DOCX canvas")).toBeNull();
+    expect(screen.queryByText("PDF canvas")).toBeNull();
+
+    resolveStatus({ ai_draft: false, unresolved_ai: false });
+    await waitFor(() => expect(screen.getByText("DOCX canvas")).toBeVisible());
+    expect(fileRequest).toHaveBeenCalledWith("/file?purpose=display");
 });
 
 it("queries the server for AI status when the panel document omitted the flags (N30/N31)", async () => {
@@ -644,7 +698,7 @@ it.each(["assistant", "project"] as const)(
         });
         const user = userEvent.setup();
         render(<VersionHarness surface={surface} />);
-        expect(viewerProps().versionId).toBe("v1");
+        await waitFor(() => expect(viewerProps().versionId).toBe("v1"));
         expect(screen.getByText(/First clause/)).toBeVisible();
         await user.click(
             await screen.findByRole("button", {
@@ -654,7 +708,7 @@ it.each(["assistant", "project"] as const)(
         await user.click(
             await screen.findByRole("menuitemradio", { name: /V2/ }),
         );
-        expect(viewerProps().versionId).toBe("v2");
+        await waitFor(() => expect(viewerProps().versionId).toBe("v2"));
         expect(screen.getAllByRole("tab")).toHaveLength(1);
         expect(screen.queryByText(/First clause/)).toBeNull();
         expect(viewerProps().quotes).toBeUndefined();

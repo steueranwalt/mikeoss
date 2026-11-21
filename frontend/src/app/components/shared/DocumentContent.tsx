@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { PdfView } from "./views/PdfView";
 import { DocxView } from "./views/DocxView";
 import type { DocxCloseGuard, DocxSaveState } from "./views/DocxRenderer.types";
@@ -163,22 +164,29 @@ export function DocumentContent({
     const draftKey = `${documentId}:${versionId ?? ""}`;
     const [serverAiDraft, setServerAiDraft] = useState(false);
     const [fetchedAiStatus, setFetchedAiStatus] = useState<{
+        key: string;
         ai_draft: boolean;
         unresolved_ai: boolean;
     } | null>(null);
-    const [aiStatusFailed, setAiStatusFailed] = useState(false);
+    const [aiStatusFailedKey, setAiStatusFailedKey] = useState<string | null>(
+        null,
+    );
     useEffect(() => {
         if (!documentId || documentId.startsWith("case:") || !versionId) {
             setFetchedAiStatus(null);
-            setAiStatusFailed(false);
+            setAiStatusFailedKey(null);
             return;
         }
         let cancelled = false;
         void getDocumentAiStatus(documentId, versionId)
             .then((status) => {
                 if (!cancelled) {
-                    setFetchedAiStatus(status);
-                    setAiStatusFailed(false);
+                    setFetchedAiStatus({
+                        key: `${documentId}:${versionId}`,
+                        ai_draft: status.ai_draft,
+                        unresolved_ai: status.unresolved_ai,
+                    });
+                    setAiStatusFailedKey(null);
                 }
             })
             .catch(() => {
@@ -186,7 +194,7 @@ export function DocumentContent({
                 // DocxView's /file (409). Fail closed to stamped /display.
                 if (!cancelled) {
                     setFetchedAiStatus(null);
-                    setAiStatusFailed(true);
+                    setAiStatusFailedKey(`${documentId}:${versionId}`);
                 }
             });
         return () => {
@@ -197,12 +205,19 @@ export function DocumentContent({
     // status, open edits, or /display's X-Mike-Ai-Draft. The viewer queries
     // the server rather than trusting flags the panel document happened to
     // carry (chat tabs often omit them).
+    const needsAiStatus =
+        Boolean(documentId) &&
+        !documentId.startsWith("case:") &&
+        Boolean(versionId);
+    const statusMatches = fetchedAiStatus?.key === draftKey;
+    const aiStatusFailed = aiStatusFailedKey === draftKey;
+    const aiStatusPending = needsAiStatus && !statusMatches && !aiStatusFailed;
     const isUnresolvedAi =
         aiStatusFailed ||
         resolvedDocument.ai_draft === true ||
         resolvedDocument.unresolved_ai === true ||
-        fetchedAiStatus?.ai_draft === true ||
-        fetchedAiStatus?.unresolved_ai === true ||
+        (statusMatches && fetchedAiStatus.ai_draft === true) ||
+        (statusMatches && fetchedAiStatus.unresolved_ai === true) ||
         serverAiDraft;
     const showAiDraft =
         (isUnresolvedAi || mode.kind === "edit") &&
@@ -413,6 +428,17 @@ export function DocumentContent({
                         onRetry={retryDocument}
                         onClearQuote={() => setActiveCitationQuoteId(null)}
                     />
+                ) : aiStatusPending ? (
+                    <div
+                        role="status"
+                        aria-label="Loading document"
+                        className="flex h-full min-h-[12rem] items-center justify-center"
+                    >
+                        <Loader2
+                            aria-hidden="true"
+                            className="h-7 w-7 animate-spin text-muted-foreground"
+                        />
+                    </div>
                 ) : useStampedPdfViewer || viewType === "pdf" ? (
                     <PdfView
                         refetchKey={refetchKey}
