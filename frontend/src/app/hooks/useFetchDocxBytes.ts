@@ -1,9 +1,43 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getBrowserAccessToken } from "@/app/lib/auth-token";
 import { getDocumentFileUrl } from "@/app/lib/mikeApi";
 import { authenticatedFetch } from "@/app/lib/authEvents";
+
+const PREVIEW_TICKET_HEADER = "X-Mike-Preview-Ticket";
+
+function isTrackedChangesPreviewUrl(url: string): boolean {
+    return (
+        url.includes("/tracked-changes-preview") &&
+        !url.includes("/tracked-changes-preview/ticket")
+    );
+}
+
+async function fetchTrackedChangesPreviewBytes(
+    url: string,
+    signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+    const parsed = new URL(url, "http://mike.local");
+    const minted = await authenticatedFetch(`${parsed.pathname}/ticket`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            edit_id: parsed.searchParams.get("edit_id"),
+        }),
+        signal,
+    });
+    if (!minted.ok) throw new Error(`HTTP ${minted.status}`);
+    const body = (await minted.json()) as { ticket?: unknown };
+    if (typeof body.ticket !== "string" || !body.ticket) {
+        throw new Error("HTTP 401");
+    }
+    const bin = await authenticatedFetch(url, {
+        signal,
+        headers: { [PREVIEW_TICKET_HEADER]: body.ticket },
+    });
+    if (!bin.ok) throw new Error(`HTTP ${bin.status}`);
+    return bin.arrayBuffer();
+}
 
 export interface FetchDocxResult {
     bytes: ArrayBuffer | null;
@@ -81,17 +115,22 @@ export function useFetchDocxBytes(
             (async () => {
                 const generation = generations.get(documentId) ?? 0;
                 // Private source bytes stay on the authenticated same-origin API.
-                // Gate B4 N37: tracked-changes-preview is Bearer-only, not cookie.
-                const preview = url.includes("/tracked-changes-preview");
-                const token = preview ? await getBrowserAccessToken() : null;
-                const bin = await authenticatedFetch(url, {
-                    signal: cacheBytes ? undefined : controller.signal,
-                    headers: token
-                        ? { Authorization: `Bearer ${token}` }
-                        : undefined,
-                });
-                if (!bin.ok) throw new Error(`HTTP ${bin.status}`);
-                const buf = await bin.arrayBuffer();
+                // Gate B4 N41: the cookie session mints a one-time preview ticket;
+                // the GET carries it in a header, never in the URL.
+                const buf = isTrackedChangesPreviewUrl(url)
+                    ? await fetchTrackedChangesPreviewBytes(
+                          url,
+                          cacheBytes ? undefined : controller.signal,
+                      )
+                    : await (async () => {
+                          const bin = await authenticatedFetch(url, {
+                              signal: cacheBytes
+                                  ? undefined
+                                  : controller.signal,
+                          });
+                          if (!bin.ok) throw new Error(`HTTP ${bin.status}`);
+                          return bin.arrayBuffer();
+                      })();
                 if (cacheBytes && generation === (generations.get(documentId) ?? 0)) bytesCache.set(key, buf);
                 return buf;
             })();

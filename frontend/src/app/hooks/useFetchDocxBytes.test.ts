@@ -1,18 +1,11 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/msw-server";
-
-const getBrowserAccessToken = vi.hoisted(() => vi.fn(async () => null as string | null));
-vi.mock("@/app/lib/auth-token", () => ({
-    getBrowserAccessToken,
-    bounceIfUnauthorized: vi.fn(),
-}));
-
+import { getBrowserAccessToken } from "@/app/lib/auth-token";
 import { useFetchDocxBytes, invalidateDocxBytes } from "./useFetchDocxBytes";
 
 beforeEach(() => {
-    getBrowserAccessToken.mockResolvedValue(null);
     // Each test runs against a fresh cache surface — eviction is per-
     // documentId so we wipe by pattern.
     invalidateDocxBytes("cache-test");
@@ -23,6 +16,7 @@ beforeEach(() => {
     invalidateDocxBytes("evict-doc-v");
     invalidateDocxBytes("d1");
     invalidateDocxBytes("d2");
+    invalidateDocxBytes("preview-n41");
 });
 
 describe("useFetchDocxBytes: idle / disabled", () => {
@@ -248,28 +242,45 @@ describe("useFetchDocxBytes: in-flight dedupe", () => {
         expect(fetchCount).toBe(1);
     });
 
-    it("sends a Bearer token for the tracked-changes preview (N37)", async () => {
-        getBrowserAccessToken.mockResolvedValue("preview-token");
+    it("mints a one-time preview ticket and fetches bytes with it in a header (N41)", async () => {
+        await expect(getBrowserAccessToken()).resolves.toBeNull();
+        let mintedEditId: string | null = null;
+        let receivedTicket: string | null = null;
         let receivedAuth: string | null = null;
         server.use(
-            http.get("*/api/single-documents/:id/tracked-changes-preview", ({ request }) => {
-                receivedAuth = request.headers.get("Authorization");
-                return new HttpResponse(new Uint8Array([1]));
-            }),
+            http.post(
+                "*/api/single-documents/:id/tracked-changes-preview/ticket",
+                async ({ request }) => {
+                    const body = (await request.json()) as { edit_id?: string };
+                    mintedEditId = body.edit_id ?? null;
+                    return HttpResponse.json({ ticket: "preview-ticket-1", expires_in: 60 });
+                },
+            ),
+            http.get(
+                "*/api/single-documents/:id/tracked-changes-preview",
+                ({ request }) => {
+                    receivedTicket = request.headers.get("X-Mike-Preview-Ticket");
+                    receivedAuth = request.headers.get("Authorization");
+                    return new HttpResponse(new Uint8Array([1]));
+                },
+            ),
         );
 
         const { result } = renderHook(() =>
             useFetchDocxBytes(
-                "preview-n37",
+                "preview-n41",
                 "v1",
                 undefined,
-                "/api/single-documents/preview-n37/tracked-changes-preview?edit_id=edit-1",
+                "/api/single-documents/preview-n41/tracked-changes-preview?edit_id=edit-1",
                 false,
             ),
         );
 
         await waitFor(() => expect(result.current.bytes).not.toBeNull());
-        expect(receivedAuth).toBe("Bearer preview-token");
+        expect(mintedEditId).toBe("edit-1");
+        expect(receivedTicket).toBe("preview-ticket-1");
+        expect(receivedAuth).toBeNull();
+        expect(new URL(window.location.href).search).not.toContain("preview-ticket");
     });
 });
 

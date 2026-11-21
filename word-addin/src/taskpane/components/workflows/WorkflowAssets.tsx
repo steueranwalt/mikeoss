@@ -4,6 +4,7 @@ import {
   deleteWorkflowAsset,
   getWorkflowAssetUrl,
   listWorkflowAssets,
+  MikeApiError,
   uploadWorkflowAssets,
   uploadWorkflowAssetVersion,
 } from "../../api/mikeApi";
@@ -153,16 +154,38 @@ export function WorkflowAssets({
               <button
                 type="button"
                 onClick={() =>
-                  void getWorkflowAssetUrl(file.id)
-                    .then(({ url }) => openExternalUrl(url))
-                    .catch((reason: unknown) =>
+                  void (async () => {
+                    try {
+                      const first = await getWorkflowAssetUrl(file.id);
+                      openExternalUrl(first.url);
+                    } catch (reason: unknown) {
+                      const token =
+                        reason instanceof MikeApiError &&
+                        reason.code === "unresolved_ai_edits" &&
+                        typeof reason.details?.confirm_token === "string"
+                          ? reason.details.confirm_token
+                          : null;
+                      if (
+                        token &&
+                        window.confirm(
+                          "KI-Entwurf, nicht freigegeben. Download mit Kennzeichnung?",
+                        )
+                      ) {
+                        const confirmed = await getWorkflowAssetUrl(
+                          file.id,
+                          token,
+                        );
+                        openExternalUrl(confirmed.url);
+                        return;
+                      }
                       setError(
                         reportFault(reason, {
                           fallback: "Mike couldn't open that file. Try again.",
                           operation: "workflows.run",
                         }).message,
-                      ),
-                    )
+                      );
+                    }
+                  })()
                 }
                 className="text-[10px] text-gray-500"
               >

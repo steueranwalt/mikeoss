@@ -41,4 +41,20 @@ describe("authenticatedFetch", () => {
         expect(listener).not.toHaveBeenCalled();
         window.removeEventListener(AUTH_SESSION_INVALIDATED_EVENT, listener);
     });
+
+    it("does not sign out on a tracked-changes preview 401 (N41)", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn().mockResolvedValue(new Response(null, { status: 401 })),
+        );
+        const listener = vi.fn();
+        window.addEventListener(AUTH_SESSION_INVALIDATED_EVENT, listener);
+
+        await authenticatedFetch(
+            "/api/single-documents/doc-1/tracked-changes-preview?edit_id=edit-1",
+        );
+
+        expect(listener).not.toHaveBeenCalled();
+        window.removeEventListener(AUTH_SESSION_INVALIDATED_EVENT, listener);
+    });
 });

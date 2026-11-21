@@ -107,6 +107,7 @@ export {
   getProjectDirectoryLevel,
   getUserProfile,
   getWorkflowAssetUrl,
+  MikeApiError,
   listProjects,
   listQuickActions,
   listPlaybooks,

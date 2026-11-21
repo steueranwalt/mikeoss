@@ -127,7 +127,14 @@ for (const exportType of ["review", "audit"] as const) {
             ? buildReviewHtml(workspace, { originalsRequested })
             : buildAuditHtml(workspace, { originalsRequested });
         const filename = `authority-trace-${run.id}-${exportType}.html`;
-        const versionId = workspace.memo.version_id;
+        const memoVersionId =
+          typeof workspace.memo.version_id === "string" &&
+          workspace.memo.version_id
+            ? workspace.memo.version_id
+            : null;
+        // A memo without version_id must not mint a token bound only to
+        // run_id/kind. Bind the confirmation to the run id instead.
+        const versionId = memoVersionId ?? run.id;
         const expectedToken = authorityTraceHtmlConfirmToken(
           run.id,
           exportType,

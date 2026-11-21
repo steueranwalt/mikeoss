@@ -34,6 +34,8 @@ export interface DocxRendererProps {
     toolbarVisible?: boolean;
     filename?: string;
     author?: string;
+    /** False hides EigenPal file.exportPdf / exportMarkdown / print chrome. */
+    chrome?: boolean;
     onChange?: () => void;
     onSave?: (bytes?: ArrayBuffer) => void;
     onReady: (surface: DocxSurface) => void;

@@ -25,7 +25,7 @@ vi.mock("./EigenpalDocxRenderer", () => ({
     default: (props: DocxRendererProps) => <MockRenderer {...props} />,
 }));
 
-function MockRenderer({ bytes, mode, toolbarVisible = true, onChange, onReady, onError, onSave }: DocxRendererProps) {
+function MockRenderer({ bytes, mode, toolbarVisible = true, chrome = true, onChange, onReady, onError, onSave }: DocxRendererProps) {
     const scroll = useRef<HTMLDivElement>(null);
     const content = useRef<HTMLDivElement>(null);
     const revision = new Uint8Array(bytes)[0];
@@ -34,7 +34,7 @@ function MockRenderer({ bytes, mode, toolbarVisible = true, onChange, onReady, o
         else if (scroll.current && content.current) onReady({ scroll: scroll.current, content: content.current, exportDocx, selectText, clearTextSelection, activateRevision, clearRevisionHighlight });
     }, [bytes, onReady, onError, revision]);
     return (
-        <div ref={scroll} data-testid="renderer-scroll" data-mode={mode}>
+        <div ref={scroll} data-testid="renderer-scroll" data-mode={mode} data-docx-chrome={chrome ? "true" : "false"}>
             {mode === "edit" && <div role="toolbar" aria-label="Document formatting" hidden={!toolbarVisible}><button onClick={onChange}>Change document</button></div>}
             <button onClick={() => void onSave?.()}>Save document</button>
             <div ref={content}>
@@ -59,7 +59,15 @@ beforeEach(() => {
     selectText.mockReset().mockReturnValue(true);
     clearTextSelection.mockReset();
     vi.mocked(authenticatedFetch).mockReset();
-    vi.mocked(authenticatedFetch).mockResolvedValue(new Response(new Uint8Array([1])));
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("/tracked-changes-preview/ticket")) {
+            return new Response(JSON.stringify({ ticket: "preview-ticket", expires_in: 60 }), {
+                headers: { "Content-Type": "application/json" },
+            });
+        }
+        return new Response(new Uint8Array([1]));
+    });
     HTMLElement.prototype.scrollTo = vi.fn(function (this: HTMLElement, options?: ScrollToOptions | number) {
         this.scrollTop = typeof options === "number" ? 0 : options?.top ?? 0;
     });
@@ -426,7 +434,7 @@ it("blocks both editing controls and saves when document permission is denied", 
     expect(replaceVersion).not.toHaveBeenCalled();
 });
 
-it("locks save, Ctrl+S, and exportDocx in the tracked-changes preview (N36)", async () => {
+it("locks save, Ctrl+S, exportDocx, print, and Eigenpal chrome in the tracked-changes preview (N36/N44)", async () => {
     const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     let download: (() => Promise<void>) | null | undefined;
@@ -457,6 +465,18 @@ it("locks save, Ctrl+S, and exportDocx in the tracked-changes preview (N36)", as
     expect(exportDocx).not.toHaveBeenCalled();
     expect(click).not.toHaveBeenCalled();
     expect(createUrl).not.toHaveBeenCalled();
+    expect(screen.getByTestId("renderer-scroll")).toHaveAttribute("data-docx-chrome", "false");
+    expect(screen.getByTestId("ai-draft-print-notice")).toHaveTextContent(
+        "KI-Entwurf, Druck nur über gestempeltes PDF",
+    );
+    const print = new KeyboardEvent("keydown", {
+        key: "p",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+    });
+    const prevented = !window.dispatchEvent(print);
+    expect(prevented || print.defaultPrevented).toBe(true);
     createUrl.mockRestore();
     click.mockRestore();
 });

@@ -36,6 +36,12 @@ import {
     resolveEdit,
     aiDraftConfirmationResponseBody,
 } from "./documents.service";
+import {
+    consumePreviewTicket,
+    mintPreviewTicket,
+    PREVIEW_TICKET_HEADER,
+    PREVIEW_TICKET_TTL_MS,
+} from "./documents.previewTickets";
 
 export const documentsRouter = Router();
 
@@ -258,36 +264,121 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
     }
 }));
 
-// GET /single-documents/:documentId/tracked-changes-preview
-// Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ) + N37: display-only exception
-// so the EditCard can render Tracked Changes. Banner + no-store. Not a
-// download: no Content-Disposition/filename, download/confirm query
-// parameters are refused, Bearer only (not the cookie session), and only
-// when there are open document_edits plus a matching edit_id.
-documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRoute(async (req, res) => {
+function refuseTrackedChangesPreviewDownload(req: {
+    query: { download?: unknown; confirm_token?: unknown };
+}, res: { status: (code: number) => { json: (body: unknown) => unknown } }): boolean {
     if (
         req.query.download === "1" ||
         req.query.download === "true" ||
         typeof req.query.confirm_token === "string"
     ) {
-        return void res.status(400).json({
+        res.status(400).json({
             detail: "Tracked-changes preview is display-only and cannot be downloaded.",
         });
+        return true;
     }
-    if (res.locals.authSource !== "bearer") {
-        return void res.status(401).json({
-            detail: "Tracked-changes preview requires a Bearer token.",
-        });
+    return false;
+}
+
+function previewSourceFailure(
+    res: Parameters<typeof sendInternalError>[0],
+    result: Exclude<Awaited<ReturnType<typeof getTrackedChangesPreviewSource>>, { ok: true }>,
+): void {
+    switch (result.kind) {
+        case "unsupported":
+            res.status(409).json({ detail: result.detail });
+            return;
+        case "not_found":
+            res.status(404).json({ detail: result.detail });
+            return;
+        default: {
+            const exhaustive: never = result;
+            sendInternalError(res, exhaustive);
+        }
     }
+}
+
+// POST /single-documents/:documentId/tracked-changes-preview/ticket
+// Gate B4 N41: the browser has no JS-readable access token, so the cookie
+// session mints a 60s one-time ticket bound to user/document/version/edit.
+// The viewer then GETs the bytes with that ticket in a header, not the URL.
+documentsRouter.post("/:documentId/tracked-changes-preview/ticket", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
-    const versionIdParam =
-        typeof req.query.version_id === "string" ? req.query.version_id : null;
-    const editId =
-        typeof req.query.edit_id === "string" ? req.query.edit_id : null;
+    const body = req.body as { edit_id?: unknown } | undefined;
+    const editId = typeof body?.edit_id === "string" ? body.edit_id : null;
+    if (!editId) {
+        return void res.status(400).json({ detail: "edit_id is required" });
+    }
     const db = createServerSupabase();
+    const result = await getTrackedChangesPreviewSource(
+        documentId,
+        userId,
+        userEmail,
+        null,
+        db,
+        editId,
+    );
+    if (!result.ok) return void previewSourceFailure(res, result);
 
+    const ticket = mintPreviewTicket({
+        userId,
+        documentId,
+        versionId: result.versionId,
+        editId,
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+        ticket,
+        expires_in: Math.floor(PREVIEW_TICKET_TTL_MS / 1000),
+    });
+}));
+
+// GET /single-documents/:documentId/tracked-changes-preview
+// Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ) + N37/N41: display-only exception
+// so the EditCard can render Tracked Changes. Banner + no-store. Not a
+// download: no Content-Disposition/filename, download/confirm query
+// parameters are refused. Cookie GETs need a one-time preview ticket;
+// Bearer JWT remains valid for Word/API. Open document_edits plus a
+// matching edit_id are required.
+documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRoute(async (req, res) => {
+    if (refuseTrackedChangesPreviewDownload(req, res)) return;
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const { documentId } = req.params;
+    const ticketHeader = req.get(PREVIEW_TICKET_HEADER)?.trim() ?? "";
+    let versionIdParam =
+        typeof req.query.version_id === "string" ? req.query.version_id : null;
+    let editId =
+        typeof req.query.edit_id === "string" ? req.query.edit_id : null;
+
+    if (ticketHeader) {
+        const claim = consumePreviewTicket(ticketHeader);
+        if (!claim) {
+            res.setHeader("Cache-Control", "no-store");
+            return void res.status(401).json({
+                detail: "Preview ticket is invalid or already used.",
+            });
+        }
+        if (
+            claim.userId !== userId ||
+            claim.documentId !== documentId ||
+            (editId && editId !== claim.editId) ||
+            (versionIdParam && versionIdParam !== claim.versionId)
+        ) {
+            res.setHeader("Cache-Control", "no-store");
+            return void res.status(404).json({ detail: "No file available" });
+        }
+        editId = claim.editId;
+        versionIdParam = claim.versionId;
+    } else if (res.locals.authSource !== "bearer") {
+        return void res.status(401).json({
+            detail: "Tracked-changes preview requires a Bearer token or a preview ticket.",
+        });
+    }
+
+    const db = createServerSupabase();
     const result = await getTrackedChangesPreviewSource(
         documentId,
         userId,
@@ -296,18 +387,7 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
         db,
         editId,
     );
-    if (!result.ok) {
-        switch (result.kind) {
-            case "unsupported":
-                return void res.status(409).json({ detail: result.detail });
-            case "not_found":
-                return void res.status(404).json({ detail: result.detail });
-            default: {
-                const exhaustive: never = result;
-                return void sendInternalError(res, exhaustive);
-            }
-        }
-    }
+    if (!result.ok) return void previewSourceFailure(res, result);
 
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Mike-Ai-Draft", "1");

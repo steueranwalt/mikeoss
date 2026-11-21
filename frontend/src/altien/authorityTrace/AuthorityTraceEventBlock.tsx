@@ -28,6 +28,7 @@ export function AuthorityTraceEventBlock({
           : event.outcome === "completed_with_failures"
             ? "Authority Trace completed with failures"
             : "Authority Trace completed";
+  const statusLabel = `${label} · KI-Entwurf`;
   const detail = isExtraction
     ? event.isStreaming
       ? undefined
@@ -92,7 +93,7 @@ export function AuthorityTraceEventBlock({
               className="group flex w-full cursor-pointer items-center gap-2 rounded-md border border-emerald-200/70 bg-emerald-50/50 px-2 py-1.5 text-left text-gray-600 transition-colors hover:bg-emerald-50 hover:text-gray-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
             >
               <span className="min-w-0 flex-1">
-                <span className="font-medium">{label}</span>
+                <span className="font-medium">{statusLabel}</span>
                 {detail ? <span> {detail}</span> : null}
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-700 group-hover:text-emerald-800">
@@ -102,7 +103,7 @@ export function AuthorityTraceEventBlock({
             </button>
           ) : (
             <>
-              <span className="font-medium">{label}</span>
+              <span className="font-medium">{statusLabel}</span>
               {detail ? <span> {detail}</span> : null}
               {event.isStreaming ? <span>...</span> : null}
             </>

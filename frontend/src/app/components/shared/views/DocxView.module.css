@@ -1,0 +1,20 @@
+.printNotice {
+    display: none;
+}
+
+@media print {
+    .previewLock :global(.docx-view-container),
+    .previewLock :global([data-docx-renderer]) {
+        display: none !important;
+    }
+
+    .printNotice {
+        display: block !important;
+        position: absolute;
+        inset: 0;
+        padding: 2rem;
+        font-size: 16px;
+        color: #111;
+        background: #fff;
+    }
+}

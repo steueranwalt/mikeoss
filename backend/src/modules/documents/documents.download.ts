@@ -703,6 +703,7 @@ export async function getTrackedChangesPreviewSource(
           fileType: string | null;
           size: number;
           filename: string;
+          versionId: string;
       }
     | { ok: false; kind: "not_found"; detail: string }
     | { ok: false; kind: "unsupported"; detail: string }
@@ -751,5 +752,6 @@ export async function getTrackedChangesPreviewSource(
             active.version_number,
             active.source === "assistant_edit",
         ),
+        versionId: active.id,
     };
 }

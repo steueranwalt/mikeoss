@@ -11,6 +11,7 @@ import type { DocxCloseGuard, DocxMode, DocxSaveState, DocxSurface } from "./Doc
 import type { CitationQuote } from "../types";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
 import { viewRoundingClass, type ViewRounding } from "./viewRounding";
+import styles from "./DocxView.module.css";
 
 const DocxRenderer = lazy(() => import("./EigenpalDocxRenderer"));
 const RENDER_ERROR = "This document could not be displayed. Please download it to view it.";
@@ -205,6 +206,17 @@ function DocxViewContent(props: Props) {
             focusSurface(surfaceRef.current);
         }
     }, [bytes, readyKey, renderKey, quoteKey, props.quoteFocusKey, props.highlightEdit?.key, focusSurface]);
+    useEffect(() => {
+        if (!displayOnly) return;
+        const blockPrint = (event: KeyboardEvent) => {
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p") {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        };
+        window.addEventListener("keydown", blockPrint, true);
+        return () => window.removeEventListener("keydown", blockPrint, true);
+    }, [displayOnly]);
 
     const renderError = bytes && failedKey === renderKey ? RENDER_ERROR : null;
     const message = error || renderError;
@@ -213,9 +225,10 @@ function DocxViewContent(props: Props) {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <WarningPopup open={!!downloadError} title="Download failed" message={downloadError} onClose={() => setDownloadError(null)} />
             <div
-                className={`document-canvas relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${viewRoundingClass(rounded)}`}
+                className={`document-canvas relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${viewRoundingClass(rounded)}${displayOnly ? ` ${styles.previewLock}` : ""}`}
                 data-document-id={documentId}
                 data-version-id={versionId ?? ""}
+                data-ai-preview={displayOnly ? "true" : undefined}
                 onScrollCapture={(event) => {
                     const surface = surfaceRef.current;
                     if (!surface || event.target !== surface.scroll) return;
@@ -240,11 +253,16 @@ function DocxViewContent(props: Props) {
                 )}
                 {message && <div role="alert" className="flex h-full items-center justify-center p-5 text-sm text-destructive">{message}</div>}
                 {!onSaveStateChange && <DocxSaveErrorPopup error={saveError} />}
+                {displayOnly && (
+                    <p className={styles.printNotice} data-testid="ai-draft-print-notice">
+                        KI-Entwurf, Druck nur über gestempeltes PDF
+                    </p>
+                )}
                 <div className="docx-view-container min-h-0 flex-1" hidden={!!message}>
                     {bytes && (
                         <DocxRenderBoundary key={renderKey} onError={onError}>
                             <Suspense fallback={null}>
-                                <DocxRenderer bytes={bytes} mode={displayOnly ? "view" : initialMode} toolbarVisible={displayOnly || props.canEdit === false ? false : props.toolbarVisible} filename={props.filename} author={props.author} onChange={onChange} onSave={displayOnly ? undefined : autosave.save} onReady={onReady} onError={onError} />
+                                <DocxRenderer bytes={bytes} mode={displayOnly ? "view" : initialMode} toolbarVisible={displayOnly || props.canEdit === false ? false : props.toolbarVisible} chrome={!displayOnly} filename={props.filename} author={props.author} onChange={onChange} onSave={displayOnly ? undefined : autosave.save} onReady={onReady} onError={onError} />
                             </Suspense>
                         </DocxRenderBoundary>
                     )}

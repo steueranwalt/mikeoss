@@ -72,18 +72,21 @@ export class MikeApiError extends Error {
   readonly status: number;
   readonly code: string | null;
   readonly requestId: string | null;
+  readonly details: Record<string, unknown> | null;
 
   constructor(args: {
     message: string;
     status: number;
     code?: string | null;
     requestId?: string | null;
+    details?: Record<string, unknown> | null;
   }) {
     super(args.message);
     this.name = "MikeApiError";
     this.status = args.status;
     this.code = args.code ?? null;
     this.requestId = args.requestId ?? null;
+    this.details = args.details ?? null;
   }
 }
 
@@ -245,11 +248,21 @@ export async function responseError(
   // session toast or login gate said what happened, and the body's "Not
   // authenticated" would only contradict it.
   const handled = sessionHandledError(response);
+  let details: Record<string, unknown> | null = null;
+  try {
+    const parsedBody = JSON.parse(text) as unknown;
+    if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
+      details = parsedBody as Record<string, unknown>;
+    }
+  } catch {
+    details = null;
+  }
   const apiError = new MikeApiError({
     status: response.status,
     code: handled?.code ?? parsed.code,
     requestId: parsed.requestId,
     message: handled?.message ?? parsed.message,
+    details,
   });
   // A 5xx is the server's fault and worth an event; 4xx are user-facing
   // outcomes (validation, permission) and stay out of Sentry.
@@ -784,9 +797,13 @@ export async function uploadWorkflowAssetVersion(
 
 export async function getWorkflowAssetUrl(
   assetId: string,
+  confirmToken?: string,
 ): Promise<{ url: string; filename: string }> {
+  const query = confirmToken
+    ? `?confirm_token=${encodeURIComponent(confirmToken)}`
+    : "";
   return apiRequest<{ url: string; filename: string }>(
-    "workflows.run", `/single-documents/${assetId}/url`,
+    "workflows.run", `/single-documents/${assetId}/url${query}`,
   );
 }
 
