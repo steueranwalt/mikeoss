@@ -16,6 +16,11 @@ import {
     type PlaybookAccessRow,
 } from "../playbooks/playbooks.service";
 import { throwIfError, uniqueStrings } from "./user.shared";
+import {
+    AI_DRAFT_NOTICE,
+    withAiDraftFlag,
+    withAiDraftFlags,
+} from "../../lib/aiDraftNotice";
 
 const PAGE_SIZE = 1000;
 
@@ -392,6 +397,19 @@ function workspaceLabel(orgId: ExportWorkspace) {
     return orgId ? { organization_id: orgId } : { personal: true };
 }
 
+function markChatBundle<T extends {
+    chats: Record<string, unknown>[];
+    messages: Record<string, unknown>[];
+}>(bundle: T): T {
+    return {
+        ...bundle,
+        chats: withAiDraftFlags(bundle.chats),
+        messages: bundle.messages.map((row) =>
+            withAiDraftFlag(row, row.role === "assistant"),
+        ),
+    };
+}
+
 export async function buildUserChatsExport(
     db: Db,
     userId: string,
@@ -408,12 +426,16 @@ export async function buildUserChatsExport(
     ]);
 
     return {
+        ai_draft_notice: AI_DRAFT_NOTICE,
         exported_at: new Date().toISOString(),
         user: { id: userId, email: userEmail ?? null },
         workspace: workspaceLabel(orgId),
-        assistant_chats: assistant,
-        word_addin_chats: wordAddin,
-        tabular_review_chats: tabular,
+        assistant_chats: markChatBundle(assistant),
+        word_addin_chats: {
+            ...markChatBundle(wordAddin),
+            documents: withAiDraftFlags(wordAddin.documents, false),
+        },
+        tabular_review_chats: markChatBundle(tabular),
     };
 }
 
@@ -439,15 +461,13 @@ export async function buildUserTabularReviewsExport(
     );
 
     return {
+        ai_draft_notice: AI_DRAFT_NOTICE,
         exported_at: new Date().toISOString(),
         user: { id: userId, email: userEmail ?? null },
         workspace: workspaceLabel(orgId),
-        tabular_reviews: tabularReviews,
-        tabular_cells: cells,
-        tabular_review_chats: {
-            chats,
-            messages,
-        },
+        tabular_reviews: withAiDraftFlags(tabularReviews),
+        tabular_cells: withAiDraftFlags(cells),
+        tabular_review_chats: markChatBundle({ chats, messages }),
     };
 }
 
@@ -845,6 +865,7 @@ export async function buildUserAccountExport(
     ]);
 
     return {
+        ai_draft_notice: AI_DRAFT_NOTICE,
         exported_at: new Date().toISOString(),
         user: { id: userId, email: userEmail ?? null },
         workspace: workspaceLabel(orgId),
@@ -867,19 +888,23 @@ export async function buildUserAccountExport(
         projects,
         project_subfolders: folders,
         library_folders: libraryFolders,
-        documents,
-        document_versions: versions,
-        document_edits: edits,
+        documents: documents.map((row) =>
+            withAiDraftFlag(row, row.ai_draft === true),
+        ),
+        document_versions: versions.map((row) =>
+            withAiDraftFlag(row, row.ai_draft === true),
+        ),
+        document_edits: withAiDraftFlags(edits),
         workflows,
         workflow_shares_by_user: workflowSharesByUser.filter(
             (row) =>
                 typeof row.workflow_id === "string" &&
                 exportedWorkflowIds.has(row.workflow_id),
         ),
-        chats: assistantChats,
-        tabular_reviews: tabularReviews,
-        tabular_cells: tabularCells,
-        tabular_review_chats: tabularChats,
+        chats: markChatBundle(assistantChats),
+        tabular_reviews: withAiDraftFlags(tabularReviews),
+        tabular_cells: withAiDraftFlags(tabularCells),
+        tabular_review_chats: markChatBundle(tabularChats),
         ...playbooks,
         shared_access: {
             projects: sharedProjects,
