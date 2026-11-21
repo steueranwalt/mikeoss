@@ -15,11 +15,7 @@ function isTrackedChangesPreviewUrl(url: string): boolean {
 
 function resolveAgainstApiBase(url: string): URL {
     if (/^https?:\/\//i.test(url)) return new URL(url);
-    try {
-        return new URL(url, API_BASE);
-    } catch {
-        return new URL(url, "http://mike.local");
-    }
+    return new URL(url, new URL(API_BASE, window.location.href));
 }
 
 async function fetchTrackedChangesPreviewBytes(

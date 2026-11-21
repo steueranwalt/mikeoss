@@ -75,7 +75,9 @@ describe("Word add-in WorkflowAssets AI-draft confirm (N48)", () => {
         fireEvent.click(screen.getByRole("button", { name: "Download" }));
 
         expect(
-            await screen.findByRole("dialog", { name: "Export AI draft?" }),
+            await screen.findByRole("dialog", {
+                name: "KI-Entwurf exportieren?",
+            }),
         ).toBeVisible();
         expect(
             screen.getByText(
@@ -85,7 +87,9 @@ describe("Word add-in WorkflowAssets AI-draft confirm (N48)", () => {
         expect(confirm).not.toHaveBeenCalled();
         expect(openExternalUrl).not.toHaveBeenCalled();
 
-        fireEvent.click(screen.getByRole("button", { name: "Export anyway" }));
+        fireEvent.click(
+            screen.getByRole("button", { name: "Trotzdem exportieren" }),
+        );
         await waitFor(() =>
             expect(getWorkflowAssetUrl).toHaveBeenCalledWith(
                 "asset-1",
@@ -96,7 +100,7 @@ describe("Word add-in WorkflowAssets AI-draft confirm (N48)", () => {
             "https://files.example/draft.docx",
         );
         expect(
-            screen.queryByRole("dialog", { name: "Export AI draft?" }),
+            screen.queryByRole("dialog", { name: "KI-Entwurf exportieren?" }),
         ).toBeNull();
     });
 
@@ -113,7 +117,9 @@ describe("Word add-in WorkflowAssets AI-draft confirm (N48)", () => {
         render(<WorkflowAssets workflowId="workflow-1" readOnly />);
         await screen.findByText("Draft.docx");
         fireEvent.click(screen.getByRole("button", { name: "Download" }));
-        fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+        fireEvent.click(
+            await screen.findByRole("button", { name: "Abbrechen" }),
+        );
 
         expect(getWorkflowAssetUrl).toHaveBeenCalledTimes(1);
         expect(openExternalUrl).not.toHaveBeenCalled();

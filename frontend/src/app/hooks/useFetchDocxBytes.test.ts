@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/msw-server";
@@ -325,6 +325,61 @@ describe("useFetchDocxBytes: in-flight dedupe", () => {
             "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview?edit_id=edit-9",
         );
         expect(new URL(ticketUrl!).origin).toBe(new URL(getUrl!).origin);
+    });
+});
+
+describe("useFetchDocxBytes: relative API_BASE (N50)", () => {
+    afterEach(() => {
+        vi.unstubAllEnvs();
+        vi.resetModules();
+    });
+
+    it("posts the preview ticket to the page origin when API_BASE is relative", async () => {
+        vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "");
+        vi.resetModules();
+        const { useFetchDocxBytes: useFetchDocxBytesRelative } = await import(
+            "./useFetchDocxBytes"
+        );
+        let ticketUrl: string | null = null;
+        let getUrl: string | null = null;
+        const origin = window.location.origin;
+        server.use(
+            http.post(
+                `${origin}/api/single-documents/:id/tracked-changes-preview/ticket`,
+                ({ request }) => {
+                    ticketUrl = request.url;
+                    return HttpResponse.json({
+                        ticket: "preview-ticket-n50",
+                        expires_in: 60,
+                    });
+                },
+            ),
+            http.get(
+                `${origin}/api/single-documents/:id/tracked-changes-preview`,
+                ({ request }) => {
+                    getUrl = request.url;
+                    return new HttpResponse(new Uint8Array([3]));
+                },
+            ),
+        );
+
+        const { result } = renderHook(() =>
+            useFetchDocxBytesRelative(
+                "preview-n50",
+                "v1",
+                undefined,
+                "/api/single-documents/preview-n50/tracked-changes-preview?edit_id=edit-1",
+                false,
+            ),
+        );
+
+        await waitFor(() => expect(result.current.bytes).not.toBeNull());
+        expect(ticketUrl).toBe(
+            `${origin}/api/single-documents/preview-n50/tracked-changes-preview/ticket`,
+        );
+        expect(getUrl).toBe(
+            `${origin}/api/single-documents/preview-n50/tracked-changes-preview?edit_id=edit-1`,
+        );
     });
 });
 

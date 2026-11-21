@@ -234,7 +234,7 @@ export function WorkflowAssets({
             id="ai-draft-export-title"
             className="text-[11px] font-medium text-amber-950"
           >
-            Export AI draft?
+            KI-Entwurf exportieren?
           </p>
           <p
             id="ai-draft-export-message"
@@ -267,14 +267,14 @@ export function WorkflowAssets({
                 })()
               }
             >
-              Export anyway
+              Trotzdem exportieren
             </button>
             <button
               type="button"
               className="text-[10px] text-gray-500"
               onClick={() => setPendingDownload(null)}
             >
-              Cancel
+              Abbrechen
             </button>
           </div>
         </div>
