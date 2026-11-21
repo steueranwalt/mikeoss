@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getDocumentFileUrl } from "@/app/lib/mikeApi";
+import { API_BASE, getDocumentFileUrl } from "@/app/lib/mikeApi";
 import { authenticatedFetch } from "@/app/lib/authEvents";
 
 const PREVIEW_TICKET_HEADER = "X-Mike-Preview-Ticket";
@@ -13,16 +13,29 @@ function isTrackedChangesPreviewUrl(url: string): boolean {
     );
 }
 
+function resolveAgainstApiBase(url: string): URL {
+    if (/^https?:\/\//i.test(url)) return new URL(url);
+    try {
+        return new URL(url, API_BASE);
+    } catch {
+        return new URL(url, "http://mike.local");
+    }
+}
+
 async function fetchTrackedChangesPreviewBytes(
     url: string,
     signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
-    const parsed = new URL(url, "http://mike.local");
-    const minted = await authenticatedFetch(`${parsed.pathname}/ticket`, {
+    const previewUrl = resolveAgainstApiBase(url);
+    const ticketUrl = new URL(previewUrl.href);
+    ticketUrl.pathname = `${previewUrl.pathname.replace(/\/$/, "")}/ticket`;
+    ticketUrl.search = "";
+    ticketUrl.hash = "";
+    const minted = await authenticatedFetch(ticketUrl.toString(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-            edit_id: parsed.searchParams.get("edit_id"),
+            edit_id: previewUrl.searchParams.get("edit_id"),
         }),
         signal,
     });
@@ -31,7 +44,7 @@ async function fetchTrackedChangesPreviewBytes(
     if (typeof body.ticket !== "string" || !body.ticket) {
         throw new Error("HTTP 401");
     }
-    const bin = await authenticatedFetch(url, {
+    const bin = await authenticatedFetch(previewUrl.toString(), {
         signal,
         headers: { [PREVIEW_TICKET_HEADER]: body.ticket },
     });

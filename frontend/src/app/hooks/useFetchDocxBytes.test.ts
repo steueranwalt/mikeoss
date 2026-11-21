@@ -282,6 +282,50 @@ describe("useFetchDocxBytes: in-flight dedupe", () => {
         expect(receivedAuth).toBeNull();
         expect(new URL(window.location.href).search).not.toContain("preview-ticket");
     });
+
+    it("posts the preview ticket to the same origin as an absolute API_BASE GET (N47)", async () => {
+        invalidateDocxBytes("preview-n47");
+        let ticketUrl: string | null = null;
+        let getUrl: string | null = null;
+        server.use(
+            http.post(
+                "http://api.example.test/api/single-documents/:id/tracked-changes-preview/ticket",
+                ({ request }) => {
+                    ticketUrl = request.url;
+                    return HttpResponse.json({
+                        ticket: "preview-ticket-n47",
+                        expires_in: 60,
+                    });
+                },
+            ),
+            http.get(
+                "http://api.example.test/api/single-documents/:id/tracked-changes-preview",
+                ({ request }) => {
+                    getUrl = request.url;
+                    return new HttpResponse(new Uint8Array([2]));
+                },
+            ),
+        );
+
+        const { result } = renderHook(() =>
+            useFetchDocxBytes(
+                "preview-n47",
+                "v1",
+                undefined,
+                "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview?edit_id=edit-9",
+                false,
+            ),
+        );
+
+        await waitFor(() => expect(result.current.bytes).not.toBeNull());
+        expect(ticketUrl).toBe(
+            "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview/ticket",
+        );
+        expect(getUrl).toBe(
+            "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview?edit_id=edit-9",
+        );
+        expect(new URL(ticketUrl!).origin).toBe(new URL(getUrl!).origin);
+    });
 });
 
 describe("useFetchDocxBytes: documentId transitions to null", () => {
