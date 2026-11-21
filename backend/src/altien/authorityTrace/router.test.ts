@@ -186,12 +186,15 @@ describe("GET /api/authority-trace/runs/:runId", () => {
       .set("Authorization", "Bearer valid-token");
 
     expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
     expect(response.body).toMatchObject({
       id: "run-1",
       project_id: "project-1",
       memo: { available: true },
       sources: {},
       reviews: [],
+      ai_draft: true,
     });
     expect(checkProjectAccessMock).toHaveBeenCalledWith(
       "project-1",
@@ -327,6 +330,9 @@ describe("Authority Trace HTML exports", () => {
     expect(response.headers["content-disposition"]).toContain("inline");
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.headers["x-mike-ai-draft"]).toBe("1");
+    expect(response.headers["content-security-policy"]).toContain(
+      "default-src 'none'",
+    );
     expect(response.text).toContain("KI-Entwurf, nicht freigegeben");
     expect(response.text).toContain("@page { size: letter landscape;");
   });
@@ -345,6 +351,7 @@ describe("Authority Trace HTML exports", () => {
     expect(blocked.status).toBe(409);
     expect(blocked.body.code).toBe("unresolved_ai_edits");
     expect(blocked.body.ai_draft).toBe(true);
+    expect(blocked.body.version_id).toBe("memo-v1");
     expect(typeof blocked.body.confirm_token).toBe("string");
 
     const downloaded = await request(makeApp())
@@ -356,6 +363,9 @@ describe("Authority Trace HTML exports", () => {
     expect(downloaded.headers["content-disposition"]).toContain("attachment");
     expect(downloaded.headers["content-disposition"]).toContain("[KI-ENTWURF]");
     expect(downloaded.headers["cache-control"]).toBe("no-store");
+    expect(downloaded.headers["content-security-policy"]).toContain(
+      "default-src 'none'",
+    );
     expect(downloaded.text).toContain("KI-Entwurf, nicht freigegeben");
   });
 });

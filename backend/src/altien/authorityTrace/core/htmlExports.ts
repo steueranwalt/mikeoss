@@ -189,6 +189,10 @@ function originalManifest(args: {
   };
 }
 
+/** Gate B4 optional: inline HTML is style-only; JSON is not executable. */
+export const AUTHORITY_TRACE_HTML_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+
 function documentShell(args: {
   title: string;
   landscape?: boolean;
@@ -214,6 +218,7 @@ function documentShell(args: {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${AUTHORITY_TRACE_HTML_CSP}">
 <title>${escapeHtml(args.title)}</title>
 <style>
 @page { size: letter${args.landscape ? " landscape" : ""}; margin: 0.45in; }
