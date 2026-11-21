@@ -1,11 +1,18 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/msw-server";
 
+const getBrowserAccessToken = vi.hoisted(() => vi.fn(async () => null as string | null));
+vi.mock("@/app/lib/auth-token", () => ({
+    getBrowserAccessToken,
+    bounceIfUnauthorized: vi.fn(),
+}));
+
 import { useFetchDocxBytes, invalidateDocxBytes } from "./useFetchDocxBytes";
 
 beforeEach(() => {
+    getBrowserAccessToken.mockResolvedValue(null);
     // Each test runs against a fresh cache surface — eviction is per-
     // documentId so we wipe by pattern.
     invalidateDocxBytes("cache-test");
@@ -239,6 +246,30 @@ describe("useFetchDocxBytes: in-flight dedupe", () => {
 
         // Only one fetch was made.
         expect(fetchCount).toBe(1);
+    });
+
+    it("sends a Bearer token for the tracked-changes preview (N37)", async () => {
+        getBrowserAccessToken.mockResolvedValue("preview-token");
+        let receivedAuth: string | null = null;
+        server.use(
+            http.get("*/api/single-documents/:id/tracked-changes-preview", ({ request }) => {
+                receivedAuth = request.headers.get("Authorization");
+                return new HttpResponse(new Uint8Array([1]));
+            }),
+        );
+
+        const { result } = renderHook(() =>
+            useFetchDocxBytes(
+                "preview-n37",
+                "v1",
+                undefined,
+                "/api/single-documents/preview-n37/tracked-changes-preview?edit_id=edit-1",
+                false,
+            ),
+        );
+
+        await waitFor(() => expect(result.current.bytes).not.toBeNull());
+        expect(receivedAuth).toBe("Bearer preview-token");
     });
 });
 

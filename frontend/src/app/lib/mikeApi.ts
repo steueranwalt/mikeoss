@@ -3079,17 +3079,20 @@ export function getDocumentFileUrl(
 }
 
 /**
- * Gate B4 audit finding N30 (preliminary): display-only Tracked Changes
- * preview. Not an export — DocxView is the only consumer.
+ * Gate B4 N30/N37: display-only Tracked Changes preview. Not an export —
+ * DocxView is the only consumer. Requires open document_edits and the
+ * edit_id of the EditCard being shown.
  */
 export function getTrackedChangesPreviewUrl(
     documentId: string,
     versionId?: string | null,
+    editId?: string | null,
 ): string {
-    const params = versionId
-        ? `?version_id=${encodeURIComponent(versionId)}`
-        : "";
-    return `${API_BASE}/single-documents/${encodeURIComponent(documentId)}/tracked-changes-preview${params}`;
+    const parts: string[] = [];
+    if (versionId) parts.push(`version_id=${encodeURIComponent(versionId)}`);
+    if (editId) parts.push(`edit_id=${encodeURIComponent(editId)}`);
+    const query = parts.length ? `?${parts.join("&")}` : "";
+    return `${API_BASE}/single-documents/${encodeURIComponent(documentId)}/tracked-changes-preview${query}`;
 }
 
 /**

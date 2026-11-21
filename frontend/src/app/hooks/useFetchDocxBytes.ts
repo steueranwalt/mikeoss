@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getBrowserAccessToken } from "@/app/lib/auth-token";
 import { getDocumentFileUrl } from "@/app/lib/mikeApi";
 import { authenticatedFetch } from "@/app/lib/authEvents";
 
@@ -80,8 +81,14 @@ export function useFetchDocxBytes(
             (async () => {
                 const generation = generations.get(documentId) ?? 0;
                 // Private source bytes stay on the authenticated same-origin API.
+                // Gate B4 N37: tracked-changes-preview is Bearer-only, not cookie.
+                const preview = url.includes("/tracked-changes-preview");
+                const token = preview ? await getBrowserAccessToken() : null;
                 const bin = await authenticatedFetch(url, {
                     signal: cacheBytes ? undefined : controller.signal,
+                    headers: token
+                        ? { Authorization: `Bearer ${token}` }
+                        : undefined,
                 });
                 if (!bin.ok) throw new Error(`HTTP ${bin.status}`);
                 const buf = await bin.arrayBuffer();

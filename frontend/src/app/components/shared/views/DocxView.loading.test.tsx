@@ -425,3 +425,38 @@ it("blocks both editing controls and saves when document permission is denied", 
     expect(exportDocx).not.toHaveBeenCalled();
     expect(replaceVersion).not.toHaveBeenCalled();
 });
+
+it("locks save, Ctrl+S, and exportDocx in the tracked-changes preview (N36)", async () => {
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    let download: (() => Promise<void>) | null | undefined;
+    render(
+        <DocxView
+            documentId="preview-lock"
+            cacheBytes={false}
+            displayUrl="/api/single-documents/doc/tracked-changes-preview?edit_id=edit"
+            defaultMode="edit"
+            canEdit
+            toolbarVisible
+            filename="Clause.docx"
+            onDownloadReady={(handler) => {
+                download = handler;
+            }}
+        />,
+    );
+    await editorReady();
+    expect(screen.getByTestId("renderer-scroll")).toHaveAttribute("data-mode", "view");
+    expect(screen.queryByRole("toolbar")).toBeNull();
+    expect(download).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save document" }));
+    fireEvent.keyDown(screen.getByTestId("renderer-scroll"), {
+        key: "s",
+        ctrlKey: true,
+    });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(exportDocx).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+    expect(createUrl).not.toHaveBeenCalled();
+    createUrl.mockRestore();
+    click.mockRestore();
+});

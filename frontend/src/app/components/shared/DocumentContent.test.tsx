@@ -384,7 +384,7 @@ it.each([
     },
 );
 
-it("keeps the editor on the tracked-changes preview for open KI edits (N30 preliminary)", () => {
+it("keeps the editor on the tracked-changes preview for open KI edits (N30/N36)", () => {
     render(
         <DocumentContent
             showToolbarToggle
@@ -408,7 +408,33 @@ it("keeps the editor on the tracked-changes preview for open KI edits (N30 preli
     expect(screen.getByText("DOCX canvas")).toBeVisible();
     expect(screen.queryByText("PDF canvas")).toBeNull();
     expect(viewerProps().displayUrl).toContain("tracked-changes-preview");
+    expect(viewerProps().displayUrl).toContain("edit_id=edit");
     expect(viewerProps().cacheBytes).toBe(false);
+    expect(viewerProps().canEdit).toBe(false);
+    expect(viewerProps().defaultMode).toBe("view");
+    expect(viewerProps().toolbarVisible).toBe(false);
+    expect(viewerProps().onDownloadReady).toBeUndefined();
+    expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+});
+
+it("fails closed to stamped display when /ai-status errors (N39)", async () => {
+    loadAiStatus.mockRejectedValue(new Error("ai-status down"));
+    render(
+        <DocumentContent
+            showToolbarToggle
+            canEdit
+            document={{
+                ...panelDocumentFromCitation(citation),
+                version_id: "v1",
+            }}
+            mode={{ kind: "document" }}
+            active
+            onCloseAnnotation={onClose}
+        />,
+    );
+    await waitFor(() => expect(screen.getByText("PDF canvas")).toBeVisible());
+    expect(loadAiStatus).toHaveBeenCalledWith("doc", "v1");
+    expect(screen.queryByText("DOCX canvas")).toBeNull();
     expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
 });
 

@@ -94,6 +94,9 @@ function DocxViewContent(props: Props) {
     const [initialMode] = useState<DocxMode>(props.defaultMode ?? "view");
     const [downloading, setDownloading] = useState(false);
     const [downloadError, setDownloadError] = useState<string | null>(null);
+    // Gate B4 N36: a displayUrl (tracked-changes preview, catalog preview)
+    // is display-only. Ctrl+S / onSave must not exportDocx+downloadBlob.
+    const displayOnly = Boolean(displayUrl);
     const fetched = useFetchDocxBytes(documentId, versionId, refetchKey, displayUrl, cacheBytes);
     // Metadata refreshes after an autosave must not remount the editor, lose
     // its undo stack, or discard edits typed while the upload was in flight.
@@ -152,7 +155,8 @@ function DocxViewContent(props: Props) {
     const onReady = useCallback((surface: DocxSurface) => {
         const firstMount = surfaceRef.current?.content !== surface.content
             || surfaceRef.current?.scroll !== surface.scroll;
-        surfaceRef.current = surface;
+        const locked = displayOnly ? { ...surface, exportDocx: undefined } : surface;
+        surfaceRef.current = locked;
         setReadyKey(renderKey);
         setFailedKey(null);
         // Repeated ready notifications must not move the caret viewport
@@ -162,13 +166,13 @@ function DocxViewContent(props: Props) {
             surface.scroll.scrollTop = lastScrollTop.current;
         }
         propsRef.current.onReady?.();
-    }, [renderKey, focusSurface]);
+    }, [displayOnly, renderKey, focusSurface]);
     const onError = useCallback(() => setFailedKey(renderKey), [renderKey]);
     const onChange = useCallback(() => {
-        if (props.canEdit === false || !surfaceRef.current?.content.isConnected) return;
+        if (displayOnly || props.canEdit === false || !surfaceRef.current?.content.isConnected) return;
         setEditedBytes(bytes);
         markChanged();
-    }, [bytes, markChanged, props.canEdit]);
+    }, [bytes, displayOnly, markChanged, props.canEdit]);
     const download = useCallback(async (providedBytes?: ArrayBuffer) => {
         const surface = surfaceRef.current;
         if (!surface?.exportDocx || downloading) return;
@@ -187,10 +191,14 @@ function DocxViewContent(props: Props) {
         }
     }, [downloading]);
     useEffect(() => {
+        if (displayOnly) {
+            onDownloadReady?.(null);
+            return () => onDownloadReady?.(null);
+        }
         if (readyKey !== renderKey || failedKey === renderKey) return;
         onDownloadReady?.(download);
         return () => onDownloadReady?.(null);
-    }, [onDownloadReady, readyKey, renderKey, failedKey, download]);
+    }, [displayOnly, onDownloadReady, readyKey, renderKey, failedKey, download]);
     const quoteKey = JSON.stringify(props.quotes ?? []);
     useEffect(() => {
         if (surfaceRef.current && readyKey === renderKey && bytes) {
@@ -236,7 +244,7 @@ function DocxViewContent(props: Props) {
                     {bytes && (
                         <DocxRenderBoundary key={renderKey} onError={onError}>
                             <Suspense fallback={null}>
-                                <DocxRenderer bytes={bytes} mode={initialMode} toolbarVisible={props.canEdit === false ? false : props.toolbarVisible} filename={props.filename} author={props.author} onChange={onChange} onSave={displayUrl ? download : autosave.save} onReady={onReady} onError={onError} />
+                                <DocxRenderer bytes={bytes} mode={displayOnly ? "view" : initialMode} toolbarVisible={displayOnly || props.canEdit === false ? false : props.toolbarVisible} filename={props.filename} author={props.author} onChange={onChange} onSave={displayOnly ? undefined : autosave.save} onReady={onReady} onError={onError} />
                             </Suspense>
                         </DocxRenderBoundary>
                     )}

@@ -166,18 +166,28 @@ export function DocumentContent({
         ai_draft: boolean;
         unresolved_ai: boolean;
     } | null>(null);
+    const [aiStatusFailed, setAiStatusFailed] = useState(false);
     useEffect(() => {
         if (!documentId || documentId.startsWith("case:") || !versionId) {
             setFetchedAiStatus(null);
+            setAiStatusFailed(false);
             return;
         }
         let cancelled = false;
         void getDocumentAiStatus(documentId, versionId)
             .then((status) => {
-                if (!cancelled) setFetchedAiStatus(status);
+                if (!cancelled) {
+                    setFetchedAiStatus(status);
+                    setAiStatusFailed(false);
+                }
             })
             .catch(() => {
-                if (!cancelled) setFetchedAiStatus(null);
+                // Gate B4 N39: a failed /ai-status must not fall through to
+                // DocxView's /file (409). Fail closed to stamped /display.
+                if (!cancelled) {
+                    setFetchedAiStatus(null);
+                    setAiStatusFailed(true);
+                }
             });
         return () => {
             cancelled = true;
@@ -188,6 +198,7 @@ export function DocumentContent({
     // the server rather than trusting flags the panel document happened to
     // carry (chat tabs often omit them).
     const isUnresolvedAi =
+        aiStatusFailed ||
         resolvedDocument.ai_draft === true ||
         resolvedDocument.unresolved_ai === true ||
         fetchedAiStatus?.ai_draft === true ||
@@ -202,10 +213,11 @@ export function DocumentContent({
         filename: resolvedDocument.title,
         fileType: resolvedDocument.type,
     });
-    // Gate B4 N30 (preliminary, pending Nils): EditCard inline Tracked
-    // Changes needs the live docx, not the stamped PDF. Dedicated preview
-    // route; no download/export path; bytes stay inside DocxView.
+    // Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ): EditCard inline Tracked
+    // Changes is a narrow display-only exception. Dedicated preview route;
+    // no download/export; editor is read-only (N36).
     const useTrackedChangesPreview =
+        !aiStatusFailed &&
         isUnresolvedAi &&
         mode.kind === "edit" &&
         viewType === "docx" &&
@@ -217,7 +229,11 @@ export function DocumentContent({
         approvedDraftKey !== draftKey &&
         !!versionId;
     const trackedChangesPreviewUrl = useTrackedChangesPreview
-        ? getTrackedChangesPreviewUrl(documentId, versionId)
+        ? getTrackedChangesPreviewUrl(
+              documentId,
+              versionId,
+              mode.kind === "edit" ? mode.edit.edit_id : null,
+          )
         : null;
     const citation = mode.kind === "citation" ? mode.citation : null;
     const firstSelectableQuoteIndex =
@@ -317,7 +333,10 @@ export function DocumentContent({
                         }
                         toolbarVisible={toolbarVisible}
                         onToggleToolbar={
-                            viewType === "docx" && canEdit && !useStampedPdfViewer
+                            viewType === "docx" &&
+                            canEdit &&
+                            !useStampedPdfViewer &&
+                            !useTrackedChangesPreview
                                 ? () => setToolbarVisible((visible) => !visible)
                                 : undefined
                         }
@@ -420,11 +439,14 @@ export function DocumentContent({
                         displayUrl={trackedChangesPreviewUrl}
                         refetchKey={refetchKey}
                         onCloseGuardReady={onCloseGuardReady}
-                        defaultMode="edit"
-                        canEdit={canEdit}
+                        defaultMode={useTrackedChangesPreview ? "view" : "edit"}
+                        canEdit={useTrackedChangesPreview ? false : canEdit}
                         // Read-only while hidden; a permission that resolves
-                        // after mount can still enable editing.
-                        toolbarVisible={canEdit && toolbarVisible}
+                        // after mount can still enable editing. Preview is
+                        // locked (N36): no toolbar, no save, no exportDocx.
+                        toolbarVisible={
+                            !useTrackedChangesPreview && canEdit && toolbarVisible
+                        }
                         filename={resolvedDocument.title}
                         documentId={documentId}
                         versionId={versionId ?? undefined}

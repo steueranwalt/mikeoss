@@ -2265,6 +2265,9 @@ describe("query and payload defaults", () => {
         expect(getTrackedChangesPreviewUrl("d 1", "v 1")).toBe(
             `${API_BASE}/single-documents/d%201/tracked-changes-preview?version_id=v%201`,
         );
+        expect(getTrackedChangesPreviewUrl("d 1", "v 1", "e 1")).toBe(
+            `${API_BASE}/single-documents/d%201/tracked-changes-preview?version_id=v%201&edit_id=e%201`,
+        );
 
         fetchMock
             .mockResolvedValueOnce(

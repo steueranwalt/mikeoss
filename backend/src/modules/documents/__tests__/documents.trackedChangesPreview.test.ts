@@ -51,7 +51,7 @@ function database() {
   } as never;
 }
 
-describe("getTrackedChangesPreviewSource (N30 preliminary)", () => {
+describe("getTrackedChangesPreviewSource (N30/N37)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     pendingEditsCount = 1;
@@ -76,6 +76,7 @@ describe("getTrackedChangesPreviewSource (N30 preliminary)", () => {
       "u@example.com",
       "version-1",
       database(),
+      "edit-1",
     );
     expect(result).toMatchObject({
       ok: true,
@@ -84,7 +85,7 @@ describe("getTrackedChangesPreviewSource (N30 preliminary)", () => {
     });
   });
 
-  it("refuses a clean version that has nothing to preview", async () => {
+  it("ohne offene Edits gibt 404", async () => {
     pendingEditsCount = 0;
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-1",
@@ -102,6 +103,30 @@ describe("getTrackedChangesPreviewSource (N30 preliminary)", () => {
       "u@example.com",
       "version-1",
       database(),
+      "edit-1",
+    );
+    expect(result).toMatchObject({ ok: false, kind: "not_found" });
+  });
+
+  it("ai_draft ohne Änderungen gibt 404", async () => {
+    pendingEditsCount = 0;
+    mocks.loadActiveVersion.mockResolvedValue({
+      id: "version-1",
+      storage_path: "documents/user-1/doc-1/source.docx",
+      pdf_storage_path: null,
+      version_number: 1,
+      filename: "Clause.docx",
+      source: "generated",
+      file_type: "docx",
+      ai_draft: true,
+    });
+    const result = await getTrackedChangesPreviewSource(
+      "doc-1",
+      "user-1",
+      "u@example.com",
+      "version-1",
+      database(),
+      "edit-1",
     );
     expect(result).toMatchObject({ ok: false, kind: "not_found" });
   });
@@ -123,6 +148,7 @@ describe("getTrackedChangesPreviewSource (N30 preliminary)", () => {
       "u@example.com",
       null,
       database(),
+      "edit-1",
     );
     expect(result).toMatchObject({ ok: false, kind: "unsupported" });
   });

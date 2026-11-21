@@ -259,11 +259,11 @@ documentsRouter.get("/:documentId/file", requireAuth, asyncRoute(async (req, res
 }));
 
 // GET /single-documents/:documentId/tracked-changes-preview
-// Gate B4 audit finding N30 (preliminary, pending Nils): display-only
-// exception so the EditCard can render Tracked Changes. Banner +
-// Cache-Control: no-store. Not a download: download/confirm query
-// parameters are refused, and the bytes are not stamped (stamping would
-// drop the markup the editor needs).
+// Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ) + N37: display-only exception
+// so the EditCard can render Tracked Changes. Banner + no-store. Not a
+// download: no Content-Disposition/filename, download/confirm query
+// parameters are refused, Bearer only (not the cookie session), and only
+// when there are open document_edits plus a matching edit_id.
 documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRoute(async (req, res) => {
     if (
         req.query.download === "1" ||
@@ -274,11 +274,18 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
             detail: "Tracked-changes preview is display-only and cannot be downloaded.",
         });
     }
+    if (res.locals.authSource !== "bearer") {
+        return void res.status(401).json({
+            detail: "Tracked-changes preview requires a Bearer token.",
+        });
+    }
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
     const { documentId } = req.params;
     const versionIdParam =
         typeof req.query.version_id === "string" ? req.query.version_id : null;
+    const editId =
+        typeof req.query.edit_id === "string" ? req.query.edit_id : null;
     const db = createServerSupabase();
 
     const result = await getTrackedChangesPreviewSource(
@@ -287,6 +294,7 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
         userEmail,
         versionIdParam,
         db,
+        editId,
     );
     if (!result.ok) {
         switch (result.kind) {
@@ -304,10 +312,6 @@ documentsRouter.get("/:documentId/tracked-changes-preview", requireAuth, asyncRo
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Mike-Ai-Draft", "1");
     res.setHeader("Content-Type", contentTypeForDocumentType(result.fileType));
-    res.setHeader(
-        "Content-Disposition",
-        buildContentDisposition("inline", result.filename),
-    );
     res.setHeader("Content-Length", result.size);
     const source = createFileReadStream(result.storagePath);
     try {

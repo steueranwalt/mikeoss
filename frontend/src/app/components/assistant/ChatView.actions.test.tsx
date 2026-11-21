@@ -110,6 +110,10 @@ vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
     getDocumentFile: vi.fn(),
     getPlaybook: vi.fn(),
     listQuickActions: vi.fn().mockResolvedValue([]),
+    getDocumentAiStatus: vi.fn().mockResolvedValue({
+        ai_draft: false,
+        unresolved_ai: false,
+    }),
 }));
 vi.mock("../shared/views/SpreadsheetView", () => ({
     SpreadsheetView: ({

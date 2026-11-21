@@ -683,10 +683,11 @@ export async function getFileStreamSource(
 }
 
 /**
- * Gate B4 audit finding N30 (preliminary): a display-only exception so the
- * EditCard can show Tracked Changes inline. Not an export: callers must not
- * offer download from these bytes, and the route refuses download/confirm
- * query parameters. Limited to docx with unresolved KI status.
+ * Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ) + N37: display-only exception
+ * so the EditCard can show Tracked Changes inline. Not an export: callers
+ * must not offer download from these bytes. Limited to docx with open
+ * `document_edits` and an edit_id that matches one of them. A pure
+ * `ai_draft` with no pending edits is not a preview.
  */
 export async function getTrackedChangesPreviewSource(
     documentId: string,
@@ -694,6 +695,7 @@ export async function getTrackedChangesPreviewSource(
     userEmail: string | undefined,
     versionIdParam: string | null,
     db: Db,
+    editId: string | null,
 ): Promise<
     | {
           ok: true;
@@ -711,13 +713,13 @@ export async function getTrackedChangesPreviewSource(
     const active = await loadActiveVersion(documentId, db, versionIdParam);
     if (!active) return { ok: false, kind: "not_found", detail: "No file available" };
 
-    const confirmation = await checkAiDraftConfirmation(
-        documentId,
-        undefined,
-        db,
-        active.id,
-    );
-    if (!confirmation.state) {
+    const state = await aiDraftConfirmationState(documentId, db, active.id);
+    if (
+        !state ||
+        state.pendingEditIds.length === 0 ||
+        !editId ||
+        !state.pendingEditIds.includes(editId)
+    ) {
         return { ok: false, kind: "not_found", detail: "No file available" };
     }
 

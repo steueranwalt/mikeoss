@@ -25,6 +25,11 @@ export const handlers = [
             ],
         }),
     ),
+    // Gate B4 N39: DocumentContent fail-closes on /ai-status errors. Tests
+    // that are not probing that path get a clean version by default.
+    http.get("*/api/single-documents/:id/ai-status", () =>
+        HttpResponse.json({ ai_draft: false, unresolved_ai: false }),
+    ),
 ];
 
 export const server = setupServer(...handlers);

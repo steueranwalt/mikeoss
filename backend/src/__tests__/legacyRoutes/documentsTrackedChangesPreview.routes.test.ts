@@ -9,12 +9,15 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../middleware/auth", () => ({
   requireAuth: (
-    _req: unknown,
+    req: { headers: { authorization?: string } },
     res: { locals: Record<string, unknown> },
     next: () => void,
   ) => {
+    const auth = req.headers.authorization ?? "";
     res.locals.userId = "user-1";
     res.locals.userEmail = "user@example.com";
+    res.locals.authSource =
+      auth.startsWith("Bearer ") && auth.slice(7).trim() ? "bearer" : "cookie";
     next();
   },
 }));
@@ -38,7 +41,7 @@ import { documentsRouter } from "../../modules/documents/documents.routes";
 const app = express();
 app.use("/single-documents", documentsRouter);
 
-describe("GET /single-documents/:documentId/tracked-changes-preview (N30 preliminary)", () => {
+describe("GET /single-documents/:documentId/tracked-changes-preview (N30/N37)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.preview.mockResolvedValue({
@@ -50,17 +53,49 @@ describe("GET /single-documents/:documentId/tracked-changes-preview (N30 prelimi
     });
   });
 
-  it("serves unresolved Word bytes inline with the KI banner headers, never as a download", async () => {
+  it("serves unresolved Word bytes with the KI banner headers, never as a download", async () => {
     const response = await request(app)
-      .get("/single-documents/document-1/tracked-changes-preview?version_id=version-1")
+      .get(
+        "/single-documents/document-1/tracked-changes-preview?version_id=version-1&edit_id=edit-1",
+      )
       .set("Authorization", "Bearer test");
 
     expect(response.status).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.headers["x-mike-ai-draft"]).toBe("1");
-    expect(response.headers["content-disposition"]).toContain("inline");
-    expect(response.headers["content-disposition"]).not.toContain("attachment");
+    expect(response.headers["content-disposition"]).toBeUndefined();
     expect(response.text).toBe("docx-bytes");
+    expect(mocks.preview).toHaveBeenCalledWith(
+      "document-1",
+      "user-1",
+      "user@example.com",
+      "version-1",
+      expect.anything(),
+      "edit-1",
+    );
+  });
+
+  it("Cookie ohne Bearer wird abgelehnt", async () => {
+    const response = await request(app)
+      .get(
+        "/single-documents/document-1/tracked-changes-preview?edit_id=edit-1",
+      )
+      .set("Cookie", "mike_session=abc");
+
+    expect(response.status).toBe(401);
+    expect(mocks.preview).not.toHaveBeenCalled();
+  });
+
+  it("ohne offene Edits gibt 404", async () => {
+    mocks.preview.mockResolvedValue({
+      ok: false,
+      kind: "not_found",
+      detail: "No file available",
+    });
+    const response = await request(app)
+      .get("/single-documents/document-1/tracked-changes-preview?edit_id=edit-1")
+      .set("Authorization", "Bearer test");
+    expect(response.status).toBe(404);
   });
 
   it("refuses download and confirm_token query parameters", async () => {
@@ -74,17 +109,5 @@ describe("GET /single-documents/:documentId/tracked-changes-preview (N30 prelimi
       .get("/single-documents/document-1/tracked-changes-preview?confirm_token=abc")
       .set("Authorization", "Bearer test");
     expect(confirmed.status).toBe(400);
-  });
-
-  it("hides a clean version — this exception is only for unresolved KI markup", async () => {
-    mocks.preview.mockResolvedValue({
-      ok: false,
-      kind: "not_found",
-      detail: "No file available",
-    });
-    const response = await request(app)
-      .get("/single-documents/document-1/tracked-changes-preview")
-      .set("Authorization", "Bearer test");
-    expect(response.status).toBe(404);
   });
 });
