@@ -924,12 +924,13 @@ export function useWordTrackedEdits({
   /**
    * One apply_word_edits batch, run through the ordinary card lifecycle.
    *
-   * Nothing here is special-cased for tools: Review mode validates and
-   * settles each card on "ready", Edit mode applies a tracked change, and
-   * both persist through the same PUT/PATCH rows as a streamed edit. The
-   * only addition is reading each card's settled status back out so the
-   * caller can post the truth to the awaiting model — which is the whole
-   * point of the client tool loop.
+   * Nothing here is special-cased for tools: every edit validates and
+   * settles on "ready" through the same review lifecycle (Gate B4 audit
+   * finding L2 removed the unreviewed "direct" apply path this used to
+   * branch on) and persists through the same PUT/PATCH rows as a streamed
+   * edit. The only addition is reading each card's settled status back out
+   * so the caller can post the truth to the awaiting model — which is the
+   * whole point of the client tool loop.
    */
   const applyToolEdits = useCallback(
     async (

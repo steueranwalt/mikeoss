@@ -8,7 +8,8 @@ import type { WordChatStorageMode } from "./wordChatTypes";
 export type { WordChatStorageMode };
 
 /**
- * How model-proposed edits reach the document.
+ * How model-proposed edits reach the document. Always `"approval"`:
+ * validate and preview each edit before the user applies it.
  *
  * `approval`: validate and preview each edit before the user applies it —
  * the only mode there ever is. `direct` (apply each streamed edit

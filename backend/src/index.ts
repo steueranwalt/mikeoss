@@ -21,6 +21,7 @@ import { initSentry } from "./lib/observability/sentry";
 import { getKeyVaultConfig } from "./lib/config";
 import { failBoot, listenOrFail } from "./lib/processLifecycle";
 import { stopExtractionProcess } from "./lib/extraction/isolated";
+import { validateMcpAdminReadOnlyAllowlistAtStartup } from "./lib/mcp/client";
 
 const PORT = process.env.PORT ?? 3001;
 const HOST = process.env.HOST?.trim() || undefined;
@@ -77,6 +78,10 @@ async function start(): Promise<void> {
   const telemetryDsn = await getKeyVaultConfig("sentry-dsn").catch(() => "");
   if (telemetryDsn) process.env.SENTRY_DSN = telemetryDsn;
   initSentry("api");
+  // Gate B4 audit finding N13: fail boot on a malformed MCP admin
+  // allowlist rather than on whatever request happens to be the first MCP
+  // tool call after a deploy.
+  validateMcpAdminReadOnlyAllowlistAtStartup();
   await initServerSessionKeys();
   // Fail fast on the document-lifecycle contract (upstream order: before any
   // other database-dependent startup) so a missing migration is reported as
