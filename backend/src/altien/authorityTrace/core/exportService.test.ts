@@ -214,6 +214,14 @@ describe("exportCitationReview", () => {
           call.table !== "create_document_version",
       ),
     ).toEqual([]);
+    expect(
+      calls.find((call) => call.table === "create_document_version")?.payload,
+    ).toMatchObject({
+      p_version: expect.objectContaining({
+        source: "generated",
+        ai_draft: true,
+      }),
+    });
   });
 
   it("refuses to export a run whose memo or source integrity checks failed", async () => {

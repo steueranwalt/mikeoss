@@ -4,6 +4,8 @@ import type { ConnectorApprovalItem } from "@mike/contracts";
 const mocks = vi.hoisted(() => ({
   google: vi.fn(),
   mcp: vi.fn(),
+  documentEdit: vi.fn(),
+  writeProjectDocument: vi.fn(),
 }));
 vi.mock("../../../../lib/integrations/googleWorkspace", async (original) => ({
   ...(await original<
@@ -14,6 +16,14 @@ vi.mock("../../../../lib/integrations/googleWorkspace", async (original) => ({
 vi.mock("../../../../lib/mcpConnectors", async (original) => ({
   ...(await original<typeof import("../../../../lib/mcpConnectors")>()),
   executeApprovedMcpToolCall: mocks.mcp,
+}));
+vi.mock("../../../documents/documents.trackedEdits", async (original) => ({
+  ...(await original<typeof import("../../../documents/documents.trackedEdits")>()),
+  applyTrackedEditsToDocument: mocks.documentEdit,
+}));
+vi.mock("../tools/projectDocumentWrites", async (original) => ({
+  ...(await original<typeof import("../tools/projectDocumentWrites")>()),
+  writeProjectDocument: mocks.writeProjectDocument,
 }));
 
 import {
@@ -304,6 +314,368 @@ describe("runApprovedConnectorActions", () => {
     ).toEqual([]);
     expect(mocks.google).not.toHaveBeenCalled();
     expect(mocks.mcp).not.toHaveBeenCalled();
+  });
+});
+
+// Gate B4 audit finding L4: edit_document pauses for approval the same way
+// connector writes do (toolDispatcher.ts). These tests cover the other half:
+// what actually happens to the document before and after that approval.
+describe("edit_document approval (Gate B4 audit finding L4)", () => {
+  const editItem: ConnectorApprovalItem = {
+    id: "approve-edit",
+    kind: "approval",
+    connector_name: "Lease.docx",
+    tool_name: "edit_document",
+    title: 'Edit "Lease.docx"',
+    arguments: {
+      doc_id: "doc-0",
+      edits: [
+        {
+          find: "ten days",
+          replace: "five days",
+          context_before: "within ",
+          context_after: ".",
+        },
+      ],
+    },
+    binding: {
+      type: "document_edit",
+      document_id: "d1",
+      client_doc_id: "doc-0",
+      version_id: "v1",
+      storage_path: "documents/u1/d1/source.docx",
+    },
+  };
+
+  it("is not applied without approval: a rejected edit never reaches applyTrackedEditsToDocument", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "reject" }],
+      },
+      "user-1",
+    );
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("is not applied while unanswered: no decision means applyTrackedEditsToDocument never runs", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("applies the exact reviewed edits once approved", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.documentEdit.mockResolvedValue({
+      ok: true,
+      version_id: "v2",
+      version_number: 2,
+      storage_path: "documents/u1/d1/edits/v2.docx",
+      download_url: "https://example.test/download/abc",
+      annotations: [{ kind: "edit" }],
+      errors: [],
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).toHaveBeenCalledExactlyOnceWith({
+      documentId: "d1",
+      userId: "user-1",
+      userEmail: null,
+      edits: [
+        {
+          find: "ten days",
+          replace: "five days",
+          context_before: "within ",
+          context_after: ".",
+          reason: undefined,
+        },
+      ],
+      db,
+      // Gate B4 audit finding N13: pins the version the binding recorded at
+      // request time, not whatever is current now.
+      expectedVersion: { id: "v1", storagePath: "documents/u1/d1/source.docx" },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ approval_id: "approve-edit", status: "ok" });
+  });
+
+  // Gate B4 audit finding N13.
+  it("refuses a legacy approval that predates the version_id binding instead of guessing at the current version", async () => {
+    const legacyEditItem: ConnectorApprovalItem = {
+      ...editItem,
+      binding: { type: "document_edit", document_id: "d1", client_doc_id: "doc-0" },
+    };
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [legacyEditItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.documentEdit).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ approval_id: "approve-edit", status: "error" });
+  });
+
+  it("stores and returns a document-write failure instead of throwing", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [editItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-edit", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.documentEdit.mockResolvedValue({
+      ok: false,
+      error: "This document changed. Run the review again before applying its suggestions.",
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].status).toBe("error");
+  });
+});
+
+// Gate B4 audit finding N11: write_project_document overwriting an existing
+// document pauses for approval the same way edit_document does.
+describe("write_project_document overwrite approval (Gate B4 audit finding N11)", () => {
+  const overwriteItem: ConnectorApprovalItem = {
+    id: "approve-overwrite",
+    kind: "approval",
+    connector_name: "cites.json",
+    tool_name: "write_project_document",
+    title: 'Overwrite "cites.json"',
+    arguments: {
+      filename: "cites.json",
+      content: '{"cites": [1]}',
+      project_id: "project-1",
+    },
+    binding: { type: "document_overwrite", document_id: "doc-existing", version_id: "version-existing" },
+  };
+
+  it("is not applied without approval: a rejected overwrite never reaches writeProjectDocument", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [overwriteItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-overwrite", kind: "approval", decision: "reject" }],
+      },
+      "user-1",
+    );
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.writeProjectDocument).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
+  it("replays the exact reviewed filename/content once approved", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [overwriteItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-overwrite", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.writeProjectDocument.mockResolvedValue({
+      ok: true,
+      document_id: "doc-existing",
+      version_id: "v2",
+      filename: "cites.json",
+      bytes: 13,
+      created: "version",
+      download_url: "/download/abc.cites.json",
+      version_number: 3,
+      storage_path: "documents/u1/doc-existing/versions/v2/cites.json",
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.writeProjectDocument).toHaveBeenCalledExactlyOnceWith(
+      {
+        filename: "cites.json",
+        content: '{"cites": [1]}',
+        userId: "user-1",
+        projectId: "project-1",
+        approved: true,
+        // Gate B4 audit finding N18: pins the version the binding captured
+        // at request time.
+        expectedVersionId: "version-existing",
+      },
+      db,
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ approval_id: "approve-overwrite", status: "ok" });
+  });
+
+  // Gate B4 audit finding N18.
+  it("reports an approval_stale refusal instead of throwing, when the document moved on", async () => {
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [overwriteItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-overwrite", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+    mocks.writeProjectDocument.mockResolvedValue({
+      ok: false,
+      error: "approval_stale",
+      detail: "'cites.json' changed after this overwrite was approved. Ask the user to approve it again.",
+      pending_overwrite: { document_id: "doc-existing", version_id: "version-newer" },
+    });
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ approval_id: "approve-overwrite", status: "error" });
+  });
+
+  it("refuses an overwrite whose binding.version_id is empty rather than skipping the stale check (N18-rest)", async () => {
+    const emptyVersionItem: ConnectorApprovalItem = {
+      ...overwriteItem,
+      binding: {
+        type: "document_overwrite",
+        document_id: "doc-existing",
+        version_id: "",
+      },
+    };
+    const { db } = messageDb([
+      { type: "ask_inputs", event_id: "ask-1", items: [emptyVersionItem] },
+    ]);
+    await appendAskInputsResponseToAssistantMessage(
+      db,
+      "chat-1",
+      {
+        assistant_message_id: "assistant-1",
+        ask_event_id: "ask-1",
+        responses: [{ id: "approve-overwrite", kind: "approval", decision: "approve" }],
+      },
+      "user-1",
+    );
+
+    const events = await runApprovedConnectorActions({
+      db,
+      chatId: "chat-1",
+      messageId: "assistant-1",
+      askEventId: "ask-1",
+      userId: "user-1",
+    });
+
+    expect(mocks.writeProjectDocument).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      approval_id: "approve-overwrite",
+      status: "error",
+    });
   });
 });
 

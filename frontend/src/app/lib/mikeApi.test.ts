@@ -41,6 +41,7 @@ import {
     addDocumentToProject,
     clearTabularCells,
     completeUserOnboarding,
+    approveAiDraftVersion,
     copyDocumentVersionFromDocument,
     copyDocumentsToWorkflowAssets,
     createChat,
@@ -82,8 +83,10 @@ import {
     getAuditActors,
     getPanelDocument,
     getDocument,
+    getDocumentAiStatus,
     getDocumentFile,
     getDocumentFileUrl,
+    getTrackedChangesPreviewUrl,
     getDocumentUrl,
     getConfiguredModels,
     getLibrary,
@@ -2249,12 +2252,21 @@ describe("tabular cell operations", () => {
 });
 
 describe("query and payload defaults", () => {
+    // DocxView still requests /file?purpose=display. Gate B4 N23: the
+    // backend no longer exempts that query for AI drafts; this helper is
+    // only the URL builder.
     it("getDocumentFile appends version_id only when a version is requested", async () => {
         expect(getDocumentFileUrl("d 1")).toBe(
-            `${API_BASE}/single-documents/d%201/file`,
+            `${API_BASE}/single-documents/d%201/file?purpose=display`,
         );
         expect(getDocumentFileUrl("d 1", "v 1")).toBe(
-            `${API_BASE}/single-documents/d%201/file?version_id=v%201`,
+            `${API_BASE}/single-documents/d%201/file?version_id=v%201&purpose=display`,
+        );
+        expect(getTrackedChangesPreviewUrl("d 1", "v 1")).toBe(
+            `${API_BASE}/single-documents/d%201/tracked-changes-preview?version_id=v%201`,
+        );
+        expect(getTrackedChangesPreviewUrl("d 1", "v 1", "e 1")).toBe(
+            `${API_BASE}/single-documents/d%201/tracked-changes-preview?version_id=v%201&edit_id=e%201`,
         );
 
         fetchMock
@@ -2284,6 +2296,49 @@ describe("query and payload defaults", () => {
         expect(await selected.blob.text()).toBe("selected");
     });
 
+    it("getDocumentFile retries an unresolved_ai_edits 409 with the bound confirm_token", async () => {
+        fetchMock
+            .mockResolvedValueOnce(
+                jsonResponse(
+                    {
+                        code: "unresolved_ai_edits",
+                        detail: "confirm first",
+                        confirm_token: "token-1",
+                        version_id: "v1",
+                        pending_edit_ids: ["edit-1"],
+                        ai_draft: true,
+                    },
+                    { status: 409 },
+                ),
+            )
+            .mockResolvedValueOnce(
+                new Response("stamped", {
+                    status: 200,
+                    headers: {
+                        "content-disposition":
+                            'attachment; filename="draft.docx"',
+                    },
+                }),
+            );
+
+        await expect(getDocumentFile("d1", "v1")).rejects.toMatchObject({
+            status: 409,
+            code: "unresolved_ai_edits",
+            details: expect.objectContaining({
+                confirm_token: "token-1",
+                version_id: "v1",
+                pending_edit_ids: ["edit-1"],
+                ai_draft: true,
+            }),
+        });
+
+        const confirmed = await getDocumentFile("d1", "v1", "token-1");
+        expect(lastFetchCall().url).toBe(
+            `${API_BASE}/single-documents/d1/file?version_id=v1&confirm_token=token-1`,
+        );
+        expect(await confirmed.blob.text()).toBe("stamped");
+    });
+
     it("getDocumentUrl appends version_id only when a version is requested", async () => {
         fetchMock.mockImplementation(() =>
             Promise.resolve(
@@ -2299,6 +2354,11 @@ describe("query and payload defaults", () => {
         await getDocumentUrl("d1", "v 1");
         expect(lastFetchCall().url).toBe(
             "http://localhost:3001/api/single-documents/d1/url?version_id=v%201",
+        );
+
+        await getDocumentUrl("d1", "v 1", "token 1");
+        expect(lastFetchCall().url).toBe(
+            "http://localhost:3001/api/single-documents/d1/url?version_id=v%201&confirm_token=token%201",
         );
     });
 
@@ -2984,6 +3044,11 @@ describe("thin endpoint wrappers", () => {
             url: "/single-documents/d1",
         },
         {
+            name: "getDocumentAiStatus",
+            call: () => getDocumentAiStatus("d 1", "v 1"),
+            url: "/single-documents/d%201/ai-status?version_id=v%201",
+        },
+        {
             name: "deleteDocument",
             call: () => deleteDocument("d1"),
             url: "/single-documents/d1",
@@ -3021,6 +3086,12 @@ describe("thin endpoint wrappers", () => {
             call: () => deleteDocumentVersion("d1", "v1"),
             url: "/single-documents/d1/versions/v1",
             method: "DELETE",
+        },
+        {
+            name: "approveAiDraftVersion",
+            call: () => approveAiDraftVersion("d1", "v1"),
+            url: "/single-documents/d1/versions/v1/approve-draft",
+            method: "POST",
         },
         // Chat
         {

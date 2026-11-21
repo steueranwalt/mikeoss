@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AiDraftBanner } from "@/app/components/shared/AiDraftBanner";
+import {
+    AiDraftExportCancelled,
+    useAiDraftExport,
+} from "@/app/hooks/useAiDraftExport";
 import {
     downloadAuthorityTraceExport,
     getAuthorityTraceRun,
@@ -89,6 +94,7 @@ export function AuthorityTracePanel({ runId }: { runId: string }) {
         null,
     );
     const [error, setError] = useState<string | null>(null);
+    const { confirmExport, dialog: exportDialog } = useAiDraftExport();
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -183,10 +189,14 @@ export function AuthorityTracePanel({ runId }: { runId: string }) {
             setExporting(kind);
             setError(null);
             try {
-                await downloadAuthorityTraceExport(runId, kind, {
-                    forceDegraded: !workspace.integrity.ok,
-                });
+                await confirmExport((confirmToken) =>
+                    downloadAuthorityTraceExport(runId, kind, {
+                        forceDegraded: !workspace.integrity.ok,
+                        confirmToken,
+                    }),
+                );
             } catch (reason) {
+                if (reason instanceof AiDraftExportCancelled) return;
                 setError(
                     reason instanceof Error
                         ? reason.message
@@ -196,7 +206,7 @@ export function AuthorityTracePanel({ runId }: { runId: string }) {
                 setExporting(null);
             }
         },
-        [exporting, runId, workspace],
+        [confirmExport, exporting, runId, workspace],
     );
 
     useEffect(() => {
@@ -256,6 +266,8 @@ export function AuthorityTracePanel({ runId }: { runId: string }) {
 
     return (
         <div className="flex h-full min-h-0 flex-col bg-slate-50">
+            {exportDialog}
+            <AiDraftBanner />
             <div className="border-b border-slate-200 bg-white px-4 py-3">
                 <div className="flex items-center justify-between gap-3">
                     <div>

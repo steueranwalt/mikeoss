@@ -20,6 +20,15 @@ export type NewDocumentVersion = {
   page_count?: number | null;
   textless_page_count?: number | null;
   content_sha256?: string | null;
+  /**
+   * Gate B4 audit finding N9: set atomically by create_document_version
+   * (migration 0179), never by a follow-up update. Only meaningful through
+   * createDocumentVersion's own `aiDraft` option for a single version;
+   * createDocumentVersions (the batch RPC replicate_document uses) passes
+   * this field straight through per-row, since its own SQL loop calls the
+   * same create_document_version function for each item.
+   */
+  ai_draft?: boolean;
 };
 
 export type DocumentVersionRecord = NewDocumentVersion & {
@@ -40,16 +49,41 @@ export type DocumentVersionRecord = NewDocumentVersion & {
 export async function createDocumentVersion(
   db: Db,
   version: NewDocumentVersion,
-  options: { activate?: boolean; job?: { id: string; attempt: number; token: string }; expectedVersion?: { id: string; storagePath: string }; edits?: Record<string, unknown>[] } = {},
+  options: {
+    activate?: boolean;
+    job?: { id: string; attempt: number; token: string };
+    expectedVersion?: { id: string; storagePath: string };
+    edits?: Record<string, unknown>[];
+    /**
+     * Gate B4 audit finding L4: marks the created version an AI draft until
+     * a human approves it (documents.versions.ts's approveAiDraftVersion).
+     * Only generate_docx/generate_excel/generate_ppt and
+     * write_project_document set this — never edit_document, which instead
+     * requires approval before it writes anything at all
+     * (connectorApprovals.ts's executeApprovedDocumentEdit).
+     */
+    aiDraft?: boolean;
+  } = {},
 ) {
   const { document_id, ...metadata } = version;
+  // Gate B4 audit finding N9: ai_draft rides in the same p_version payload
+  // the RPC inserts in one statement (migration 0179) — not a follow-up
+  // UPDATE after the insert/activation, which left a window where an
+  // activated, visible version could carry no draft marking at all if that
+  // second call failed.
   const { data, error } = await db.rpc("create_document_version", {
     p_document_id: document_id,
-    p_version: metadata,
+    p_version: { ...metadata, ai_draft: options.aiDraft === true },
     p_activate: options.activate !== false,
     ...(options.job ? { p_job_identity: options.job, p_expected_version: options.expectedVersion ?? null, p_edits: options.edits ?? [] } : {}),
   });
-  if (!error && data?.id) await processDocumentTextInline(db, [data.id]).catch((err) => logError("document-text", safeError(err)));
+  // The RPC echoes the inserted row's id in production; a caller that
+  // already supplied one (write_project_document generates its own) does
+  // not depend on that echo to know it.
+  const createdId = data?.id ?? version.id;
+  if (!error && createdId) {
+    await processDocumentTextInline(db, [createdId]).catch((err) => logError("document-text", safeError(err)));
+  }
   return { data: data as DocumentVersionRecord | null, error };
 }
 

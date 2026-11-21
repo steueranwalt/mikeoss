@@ -186,12 +186,15 @@ describe("GET /api/authority-trace/runs/:runId", () => {
       .set("Authorization", "Bearer valid-token");
 
     expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
     expect(response.body).toMatchObject({
       id: "run-1",
       project_id: "project-1",
       memo: { available: true },
       sources: {},
       reviews: [],
+      ai_draft: true,
     });
     expect(checkProjectAccessMock).toHaveBeenCalledWith(
       "project-1",
@@ -303,9 +306,10 @@ describe("Authority Trace HTML exports", () => {
       )
       .set("Authorization", "Bearer valid-token");
     expect(forced.status).toBe(200);
-    expect(forced.headers["content-disposition"]).toContain(
-      "authority-trace-run-1-review.html",
-    );
+    expect(forced.headers["content-disposition"]).toContain("inline");
+    expect(forced.headers["cache-control"]).toBe("no-store");
+    expect(forced.headers["x-mike-ai-draft"]).toBe("1");
+    expect(forced.text).toContain("KI-Entwurf, nicht freigegeben");
     expect(forced.text).toContain("DEGRADED EXPORT");
   });
 
@@ -323,6 +327,87 @@ describe("Authority Trace HTML exports", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.headers["content-disposition"]).toContain("inline");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
+    expect(response.headers["content-security-policy"]).toContain(
+      "default-src 'none'",
+    );
+    expect(response.text).toContain("KI-Entwurf, nicht freigegeben");
     expect(response.text).toContain("@page { size: letter landscape;");
+  });
+
+  it("requires confirmation to download the HTML as an AI-draft attachment (N35)", async () => {
+    getCitationVerificationRunMock.mockResolvedValue({
+      id: "run-1",
+      project_id: "project-1",
+    });
+    checkProjectAccessMock.mockResolvedValue({ ok: true });
+    getAuthorityTraceWorkspaceMock.mockResolvedValue(exportWorkspace());
+
+    const blocked = await request(makeApp())
+      .get("/api/authority-trace/runs/run-1/review.html?download=1")
+      .set("Authorization", "Bearer valid-token");
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.code).toBe("unresolved_ai_edits");
+    expect(blocked.body.ai_draft).toBe(true);
+    expect(blocked.body.version_id).toBe("memo-v1");
+    expect(typeof blocked.body.confirm_token).toBe("string");
+
+    const downloaded = await request(makeApp())
+      .get(
+        `/api/authority-trace/runs/run-1/review.html?download=1&confirm_token=${blocked.body.confirm_token}`,
+      )
+      .set("Authorization", "Bearer valid-token");
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.headers["content-disposition"]).toContain("attachment");
+    expect(downloaded.headers["content-disposition"]).toContain("[KI-ENTWURF]");
+    expect(downloaded.headers["cache-control"]).toBe("no-store");
+    expect(downloaded.headers["content-security-policy"]).toContain(
+      "default-src 'none'",
+    );
+    expect(downloaded.text).toContain("KI-Entwurf, nicht freigegeben");
+  });
+
+  it("binds a memo without version_id to the memo content hash instead of minting an unbound token (N49)", async () => {
+    getCitationVerificationRunMock.mockResolvedValue({
+      id: "run-1",
+      project_id: "project-1",
+    });
+    checkProjectAccessMock.mockResolvedValue({ ok: true });
+    const workspace = exportWorkspace();
+    delete (workspace.memo as { version_id?: string }).version_id;
+    getAuthorityTraceWorkspaceMock.mockResolvedValue(workspace);
+
+    const { createHash } = await import("node:crypto");
+    const memoHash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          document_id: workspace.memo.document_id ?? null,
+          filename: workspace.memo.filename ?? null,
+          segments: workspace.memo.segments.map((segment) => segment.text),
+        }),
+      )
+      .digest("hex");
+
+    const blocked = await request(makeApp())
+      .get("/api/authority-trace/runs/run-1/review.html?download=1")
+      .set("Authorization", "Bearer valid-token");
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.version_id).toBe(memoHash);
+    expect(blocked.body.version_id).not.toBe("run-1");
+    expect(typeof blocked.body.confirm_token).toBe("string");
+
+    const unbound = createHash("sha256")
+      .update(JSON.stringify({ run_id: "run-1", kind: "review", ai_draft: true }))
+      .digest("hex");
+    expect(blocked.body.confirm_token).not.toBe(unbound);
+
+    const downloaded = await request(makeApp())
+      .get(
+        `/api/authority-trace/runs/run-1/review.html?download=1&confirm_token=${blocked.body.confirm_token}`,
+      )
+      .set("Authorization", "Bearer valid-token");
+    expect(downloaded.status).toBe(200);
   });
 });

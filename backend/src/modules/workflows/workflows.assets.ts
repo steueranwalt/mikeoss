@@ -15,7 +15,7 @@ import { findDocumentsOutsideWorkspace } from "../../lib/documentWorkspace";
 import { convertedPdfKey } from "../../lib/convert";
 import { storageKey } from "../../lib/storage";
 import { enqueueStorageCleanup } from "../../lib/dbq/enqueue";
-import { attachActiveVersionPaths, attachLatestVersionNumbers } from "../../lib/documentVersions";
+import { attachActiveVersionPaths, attachLatestVersionNumbers, pendingAiEditVersionIds } from "../../lib/documentVersions";
 import { resolveWorkflowAccess, assetsUnsupported } from "./workflows.access";
 
 // --- Assets (assistant workflows only) -------------------------------------
@@ -161,7 +161,7 @@ export async function copyDocumentsToWorkflowAssets(
   const { data: sourceVersions, error: versionsError } = await db
     .from("document_versions")
     .select(
-      "id, document_id, storage_path, pdf_storage_path, filename, file_type, size_bytes, page_count, textless_page_count, content_sha256",
+      "id, document_id, storage_path, pdf_storage_path, filename, file_type, size_bytes, page_count, textless_page_count, content_sha256, ai_draft",
     )
     .in("id", versionIds)
     .is("deleted_at", null);
@@ -174,6 +174,15 @@ export async function copyDocumentsToWorkflowAssets(
     sourceVersions.some((version) => !version.storage_path || !version.filename)
   ) {
     return { ok: false, kind: "documents_not_ready" };
+  }
+  let pendingOnSources: Set<string>;
+  try {
+    pendingOnSources = await pendingAiEditVersionIds(
+      db,
+      sourceVersions.map((version) => version.id as string),
+    );
+  } catch (error) {
+    return { ok: false, kind: "db_error", error };
   }
 
   const sourceDocumentById = new Map(
@@ -252,6 +261,13 @@ export async function copyDocumentsToWorkflowAssets(
           page_count: plan.sourceVersion.page_count,
           textless_page_count: plan.sourceVersion.textless_page_count,
           content_sha256: plan.sourceVersion.content_sha256,
+        }, {
+          // Gate B4 audit finding N25/N32: a workflow-asset copy inherits
+          // the source version's unreviewed AI status, including pending
+          // tracked changes that are not copied as document_edits.
+          aiDraft:
+            plan.sourceVersion.ai_draft === true ||
+            pendingOnSources.has(plan.sourceVersion.id as string),
         });
       if (error) throw error;
     }

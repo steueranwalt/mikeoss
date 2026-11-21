@@ -191,6 +191,13 @@ describe("diagnostic chat API", () => {
       .set("Authorization", "Bearer valid-token");
 
     expect(response.status).toBe(200);
+    expect(response.headers["x-mike-ai-draft"]).toBe("1");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body.ai_draft_notice).toBe(
+      "Enthält KI-Entwürfe, nicht freigegeben",
+    );
+    expect(response.body.ai_draft).toBe(true);
+    expect(response.body.chat.ai_draft).toBe(true);
     expect(response.body.timeline.map((event: { type: string }) => event.type))
       .toEqual([
         "courtlistener_read_case",

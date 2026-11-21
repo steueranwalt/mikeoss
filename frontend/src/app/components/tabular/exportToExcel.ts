@@ -32,6 +32,9 @@ function sanitizeFilename(name: string): string {
     );
 }
 
+export const TABULAR_AI_DRAFT_NOTICE =
+    "Enthält KI-Entwürfe, nicht freigegeben";
+
 export async function exportTabularReviewToExcel(params: {
     reviewTitle: string;
     columns: ColumnConfig[];
@@ -47,14 +50,28 @@ export async function exportTabularReviewToExcel(params: {
     }
 
     const wb = new ExcelJS.Workbook();
+    const notice = wb.addWorksheet("KI-Hinweis");
+    notice.addRow([TABULAR_AI_DRAFT_NOTICE]);
+    notice.addRow(["KI-Entwurf, nicht freigegeben"]);
+    notice.getRow(1).font = { bold: true };
+
     const ws = wb.addWorksheet("Review");
+    const columnCount = 1 + sortedCols.length;
+    ws.mergeCells(1, 1, 1, columnCount);
+    const reviewNotice = ws.getCell(1, 1);
+    reviewNotice.value = "KI-Entwurf, nicht freigegeben";
+    reviewNotice.font = { bold: true };
+    reviewNotice.alignment = { vertical: "middle" };
 
     ws.columns = [
-        { header: "Folder / document", width: 40 },
-        ...sortedCols.map((c) => ({ header: c.name, width: 40 })),
+        { width: 40 },
+        ...sortedCols.map(() => ({ width: 40 })),
     ];
 
-    const headerRow = ws.getRow(1);
+    const headerRow = ws.addRow([
+        "Folder / document",
+        ...sortedCols.map((c) => c.name),
+    ]);
     headerRow.font = { bold: true };
     headerRow.alignment = { vertical: "middle" };
     headerRow.fill = {
@@ -83,7 +100,7 @@ export async function exportTabularReviewToExcel(params: {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${sanitizeFilename(reviewTitle)}.xlsx`;
+    a.download = `[KI-ENTWURF] ${sanitizeFilename(reviewTitle)}.xlsx`;
     document.body.appendChild(a);
     a.click();
     a.remove();

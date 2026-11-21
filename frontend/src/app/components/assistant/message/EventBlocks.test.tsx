@@ -1,6 +1,11 @@
 import { StrictMode } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/app/lib/auth-token", () => ({
+    getBrowserAccessToken: vi.fn().mockResolvedValue("browser-token"),
+    bounceIfUnauthorized: vi.fn(),
+}));
 import {
     AskInputsBlock,
     CourtListenerBlock,
@@ -152,6 +157,47 @@ describe("DocDownloadBlock", () => {
                 'img[src*="/icons/file-types/word.svg"]',
             ),
         ).toHaveClass("h-3.5", "w-3.5", "@md:h-4", "@md:w-4");
+    });
+
+    it("opens the export confirmation dialog on a 409 instead of showing HTTP 409 (N26)", async () => {
+        const fetchMock = vi.fn()
+            .mockResolvedValueOnce(
+                new Response(
+                    JSON.stringify({
+                        code: "unresolved_ai_edits",
+                        detail: "This document has AI-proposed changes.",
+                        confirm_token: "token-1",
+                        version_id: "version-1",
+                        pending_edit_ids: [],
+                        ai_draft: true,
+                    }),
+                    { status: 409, headers: { "Content-Type": "application/json" } },
+                ),
+            )
+            .mockResolvedValueOnce(new Response("stamped", { status: 200 }));
+        vi.stubGlobal("fetch", fetchMock);
+        vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:stamped");
+        vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+
+        render(
+            <DocDownloadBlock
+                filename="draft.docx"
+                download_url="/download/token.draft.docx"
+            />,
+        );
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: "Download draft.docx" }));
+        });
+        expect(await screen.findByRole("dialog")).toHaveTextContent("version-1");
+        expect(screen.queryByText(/HTTP 409/)).not.toBeInTheDocument();
+        await act(async () => {
+            fireEvent.click(screen.getByRole("button", { name: "Export anyway" }));
+        });
+        expect(fetchMock).toHaveBeenLastCalledWith(
+            expect.stringContaining("confirm_token=token-1"),
+            expect.anything(),
+        );
+        vi.unstubAllGlobals();
     });
 });
 

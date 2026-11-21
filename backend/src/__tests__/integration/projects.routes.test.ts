@@ -2006,6 +2006,8 @@ describe("projects.routes", () => {
                         content_sha256: "a".repeat(64),
                         deleted_at: null,
                         created_at: "2026-01-02T00:00:00Z",
+                        // Gate B4 audit finding N7.
+                        ai_draft: true,
                     },
                 ],
                 error: null,
@@ -2053,6 +2055,9 @@ describe("projects.routes", () => {
             const doc = res.body.documents[0];
             expect(doc.versions[0].content_sha256).toBe("a".repeat(64));
             expect(doc.edits[0].status).toBe("accepted");
+            // Gate B4 audit finding N7: an AI-drafted, never-approved
+            // version says so in the export manifest.
+            expect(doc.versions[0].ai_draft).toBe(true);
         });
 
         it("carries a digest and no signature when signing is not configured", async () => {

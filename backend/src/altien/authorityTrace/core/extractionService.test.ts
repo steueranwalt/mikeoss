@@ -133,6 +133,11 @@ describe("extractDocumentForVerification", () => {
     expect(calls.find((call) => call.op === "update")?.filters).toContainEqual(
       ["eq", "id", result.extracted_document_id],
     );
+    expect(
+      calls.find((call) => call.table === "create_document_version")?.payload,
+    ).toMatchObject({
+      p_version: expect.objectContaining({ ai_draft: true }),
+    });
   });
 
   it("passes a PDF printed-page offset and records it", async () => {

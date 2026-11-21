@@ -165,6 +165,11 @@ export async function applyTrackedEditsToDocument(params: {
       filename: versionFilename, file_type: "docx", size_bytes: editedBytes.byteLength,
       page_count: null, content_sha256: contentSha256(editedBytes),
     }, { activate: true, job: params.job, expectedVersion: params.expectedVersion,
+      // Gate B4 audit finding N10: a follow-up version inherits ai_draft
+      // from the version it replaces — an edit to an AI draft is still a
+      // draft until a human calls approve-draft, not re-cleared by the act
+      // of editing it.
+      aiDraft: activeVersion.ai_draft === true,
       edits: changes.map(c => ({ change_id: c.id, del_w_id: c.delId ?? null, ins_w_id: c.insId ?? null,
         deleted_text: c.deletedText, inserted_text: c.insertedText, context_before: c.contextBefore ?? "", context_after: c.contextAfter ?? "" })),
     });
@@ -251,7 +256,12 @@ export async function applyTrackedEditsToDocument(params: {
         size_bytes: editedBytes.byteLength,
         page_count: null,
         content_sha256: contentSha256(editedBytes),
-      }, { activate: false });
+      }, {
+        activate: false,
+        // Gate B4 audit finding N10: inherit ai_draft from the version this
+        // edit replaces.
+        aiDraft: activeVersion.ai_draft === true,
+      });
     if (verErr || !versionRow) {
       return { ok: false, error: "Failed to record document version." };
     }

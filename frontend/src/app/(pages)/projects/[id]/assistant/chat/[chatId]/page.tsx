@@ -561,22 +561,35 @@ export default function ProjectAssistantChatPage() {
         versionId: string | null;
         versionNumber: number | null;
     }) => {
-        openTab(
-            args.documentId,
-            args.filename,
-            undefined,
-            args.versionId,
-            undefined,
-            {
-                document_id: args.documentId,
-                title: args.filename,
-                type: panelDocumentType(args.filename),
-                version_id: args.versionId,
-                version_number: args.versionNumber,
-                quotes: [],
-                metadata: [],
-            },
-        );
+        const request = openRequest.current;
+        void resolvePanelDocumentVersionResult({
+            document_id: args.documentId,
+            title: args.filename,
+            type: panelDocumentType(args.filename),
+            version_id: args.versionId,
+            version_number: args.versionNumber,
+            quotes: [],
+            metadata: [],
+        }).then((result) => {
+            if (request !== openRequest.current) return;
+            if (result.status !== "resolved") {
+                setDocumentDropError(
+                    result.status === "denied"
+                        ? "This document is no longer available."
+                        : "This document could not be opened. Please try again.",
+                );
+                return;
+            }
+            const document = result.document;
+            openTab(
+                document.document_id,
+                document.title,
+                undefined,
+                document.version_id,
+                document.type,
+                document,
+            );
+        });
     };
 
     const handleEditViewClick = (
@@ -1609,7 +1622,7 @@ export default function ProjectAssistantChatPage() {
                         addDocToChat(document)
                     }
                     addToChatDisabled={!canSendChat}
-                    onDownloadDoc={(document) => documentViewers.download(document.id, document.id, tabs.find((tab) => tab.documentId === document.id)?.versionId, document.filename)}
+                    onDownloadDoc={(document) => documentViewers.download(document.id, document.id, tabs.find((tab) => tab.documentId === document.id)?.versionId, document.filename, document.ai_draft === true || document.unresolved_ai === true)}
                     downloading={explorerDownload.downloading}
                     onRenameDoc={handleRenameDoc}
                     onDeleteDoc={requestDeleteDoc}
@@ -1805,6 +1818,7 @@ export default function ProjectAssistantChatPage() {
                     )
                 }
             />
+            {explorerDownload.confirmation}
             <WarningPopup
                 open={!!explorerDownload.error}
                 title="Download failed"

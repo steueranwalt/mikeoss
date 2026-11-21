@@ -15,6 +15,30 @@ export function subscribeAuthEpoch(listener: () => void): () => void {
  * Fetch an authenticated application resource and immediately invalidate the
  * browser's in-memory auth state when the backend rejects the session.
  */
+function requestHref(input: RequestInfo | URL): string {
+    if (typeof input === "string") return input;
+    if (input instanceof URL) return input.href;
+    return input.url;
+}
+
+/**
+ * Gate B4 N41: a 401/404 on the tracked-changes preview is a missing or
+ * spent ticket, not a dead session. Signing out here made the Prüfansicht
+ * unload the whole workspace.
+ */
+function isTrackedChangesPreviewGet(
+    input: RequestInfo | URL,
+    init?: RequestInit,
+): boolean {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method !== "GET") return false;
+    const href = requestHref(input);
+    return (
+        href.includes("/tracked-changes-preview") &&
+        !href.includes("/tracked-changes-preview/ticket")
+    );
+}
+
 export async function authenticatedFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
@@ -24,7 +48,11 @@ export async function authenticatedFetch(
         credentials: "include",
     });
 
-    if (response.status === 401 && typeof window !== "undefined") {
+    if (
+        response.status === 401 &&
+        typeof window !== "undefined" &&
+        !isTrackedChangesPreviewGet(input, init)
+    ) {
         window.dispatchEvent(new Event(AUTH_SESSION_INVALIDATED_EVENT));
     }
 

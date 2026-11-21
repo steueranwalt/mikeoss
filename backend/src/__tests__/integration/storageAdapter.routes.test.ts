@@ -40,7 +40,7 @@ vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
 const database = {
   from: vi.fn(() => {
     const query: Record<string, unknown> = {};
-    for (const method of ["select", "eq"]) {
+    for (const method of ["select", "eq", "order"]) {
       query[method] = vi.fn(() => query);
     }
     query.single = vi.fn(async () => ({
@@ -53,6 +53,11 @@ const database = {
       },
       error: null,
     }));
+    // Gate B4 audit finding N4/N5: aiDraftConfirmationState's document_edits
+    // lookup never calls .single(); it awaits the select/eq/order chain
+    // itself. No pending rows, so nothing needs confirmation.
+    query.then = (resolve: (value: unknown) => unknown) =>
+      Promise.resolve({ data: [], error: null }).then(resolve);
     return query;
   }),
 };

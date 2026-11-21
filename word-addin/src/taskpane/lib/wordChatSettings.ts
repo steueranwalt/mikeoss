@@ -11,17 +11,13 @@ export type { WordChatStorageMode };
  * How model-proposed edits reach the document. Always `"approval"`:
  * validate and preview each edit before the user applies it.
  *
- * Gate B4 audit finding N13: `"direct"` (apply each streamed edit
- * immediately as a pending tracked change, skipping review) used to be
- * retained as a type value even though nothing could construct it anymore
- * (`useWordEditApplyMode` below never returns it, and `scheduleDirectEdit` —
- * the function that used to build on it — was removed). A type that still
- * names a capability the application no longer has is itself a liability:
- * it is one incautious change away from becoming constructible again
- * without the type system raising an error anywhere. This type is a single
- * literal rather than a union for the same reason connectorSettingsPatch
- * silently drops requireWriteApproval instead of validating it — the value
- * cannot exist, not merely "is validated to be approval".
+ * `approval`: validate and preview each edit before the user applies it —
+ * the only mode there ever is. `direct` (apply each streamed edit
+ * immediately as a pending tracked change, no preview) existed before Gate
+ * B4 and is gone from the type entirely (Gate B4 audit finding N13): every
+ * Word edit is reviewed before it reaches the document, never a user
+ * setting, so there is nothing left for a caller to narrow against. See
+ * EditApplyModeMenu.tsx, which no longer offers a choice at all.
  */
 export type WordEditApplyMode = "approval";
 

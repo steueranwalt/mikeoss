@@ -35,6 +35,7 @@ import {
   normalizeStoredAssistantEvents,
 } from "../lib/wordChatEvents";
 import type { PersistedWordEditPatch } from "../lib/wordChatTypes";
+import type { WordEditApplyMode } from "@mike/contracts";
 
 // Dev fork: every backend router is mounted under /api (upstream's are at the
 // root), so the client's base is `${REACT_APP_API_BASE_URL}/api`.
@@ -106,6 +107,7 @@ export {
   getProjectDirectoryLevel,
   getUserProfile,
   getWorkflowAssetUrl,
+  MikeApiError,
   listProjects,
   listQuickActions,
   listPlaybooks,
@@ -234,7 +236,7 @@ function normalizeWordDocumentEdits(value: unknown): WordDocumentEdit[] {
       typeof row.block_index !== "number" ||
       typeof row.original_text !== "string" ||
       typeof row.replacement_text !== "string" ||
-      (row.apply_mode !== "direct" && row.apply_mode !== "approval") ||
+      row.apply_mode !== "approval" ||
       (row.apply_status !== "proposed" &&
         row.apply_status !== "applied" &&
         row.apply_status !== "unmanaged" &&
@@ -257,7 +259,7 @@ function normalizeWordDocumentEdits(value: unknown): WordDocumentEdit[] {
         formats,
         ...(row.occurrence === "all" ? { occurrence: "all" as const } : {}),
         ...(typeof row.reason === "string" ? { reason: row.reason } : {}),
-        applyMode: row.apply_mode,
+        applyMode: "approval",
         applyStatus: row.apply_status,
         ...(row.resolution_status === "accepted" ||
         row.resolution_status === "rejected"
@@ -407,7 +409,7 @@ export async function createCloudWordDocumentEdit(args: {
   formats: string[];
   occurrence?: "all";
   reason?: string;
-  applyMode: "direct" | "approval";
+  applyMode: WordEditApplyMode;
 }): Promise<WordDocumentEdit> {
   const params = new URLSearchParams({ document_id: args.documentId });
   const res = await fetchWithRefresh(

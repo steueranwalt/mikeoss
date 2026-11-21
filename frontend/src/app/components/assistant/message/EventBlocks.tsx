@@ -1,3 +1,5 @@
+"use client";
+
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useReasoningDisclosure } from "@/shared/hooks/useReasoningDisclosure";
 import ReactMarkdown from "react-markdown";
@@ -7,6 +9,12 @@ import {
     getBrowserAccessToken,
     bounceIfUnauthorized,
 } from "@/app/lib/auth-token";
+import { MikeApiError } from "@/app/lib/mikeApi";
+import { downloadBlob } from "@/app/lib/downloadDocument";
+import {
+    AiDraftExportCancelled,
+    useAiDraftExport,
+} from "@/app/hooks/useAiDraftExport";
 import { EventDisclosureButton } from "@/app/components/assistant/message/EventDisclosure";
 import type { AssistantEvent } from "../../shared/types";
 import { FileTypeIcon } from "../../shared/FileTypeIcon";
@@ -416,6 +424,7 @@ export function DocDownloadBlock({
     const isSafeHref = download_url.startsWith("/");
     const href = isSafeHref ? `${API_BASE}${download_url}` : null;
     const [busy, setBusy] = useState(false);
+    const { confirmExport, dialog } = useAiDraftExport();
 
     const handleDownload = async (e?: {
         stopPropagation?: () => void;
@@ -426,22 +435,39 @@ export function DocDownloadBlock({
         if (busy || isReloading || !href) return;
         setBusy(true);
         try {
-            const token = await getBrowserAccessToken();
-            const resp = await fetch(href, {
-                credentials: "include",
-                headers: token ? { Authorization: `Bearer ${token}` } : {},
+            await confirmExport(async (confirmToken) => {
+                const token = await getBrowserAccessToken();
+                const url = confirmToken
+                    ? `${href}${href.includes("?") ? "&" : "?"}confirm_token=${encodeURIComponent(confirmToken)}`
+                    : href;
+                const resp = await fetch(url, {
+                    credentials: "include",
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
+                });
+                bounceIfUnauthorized(resp);
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    let parsed: Record<string, unknown> | null = null;
+                    try {
+                        parsed = JSON.parse(text) as Record<string, unknown>;
+                    } catch {
+                        parsed = null;
+                    }
+                    throw new MikeApiError({
+                        status: resp.status,
+                        code: typeof parsed?.code === "string" ? parsed.code : null,
+                        message:
+                            typeof parsed?.detail === "string"
+                                ? parsed.detail
+                                : `HTTP ${resp.status}`,
+                        details: parsed,
+                    });
+                }
+                downloadBlob(await resp.blob(), filename);
             });
-            bounceIfUnauthorized(resp);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const blob = await resp.blob();
-            const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = blobUrl;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        } catch (error) {
+            if (error instanceof AiDraftExportCancelled) return;
+            throw error;
         } finally {
             setBusy(false);
         }
@@ -491,8 +517,7 @@ export function DocDownloadBlock({
         </button>
     );
 
-    if (onOpen) {
-        return (
+    const card = onOpen ? (
             <div
                 className={`@container flex items-stretch overflow-hidden w-full font-serif ${RESPONSE_GLASS_SURFACE}`}
             >
@@ -505,21 +530,14 @@ export function DocDownloadBlock({
                 </button>
                 {downloadIcon}
             </div>
-        );
-    }
-
-    if (spinning) {
-        return (
+    ) : spinning ? (
             <div
                 className={`@container flex items-stretch overflow-hidden w-full font-serif ${RESPONSE_GLASS_SURFACE}`}
             >
                 {body}
                 {downloadIcon}
             </div>
-        );
-    }
-
-    return (
+    ) : (
         <div
             className={`@container flex items-stretch overflow-hidden w-full font-serif ${RESPONSE_GLASS_SURFACE}`}
         >
@@ -532,6 +550,12 @@ export function DocDownloadBlock({
             </button>
             {downloadIcon}
         </div>
+    );
+    return (
+        <>
+            {dialog}
+            {card}
+        </>
     );
 }
 

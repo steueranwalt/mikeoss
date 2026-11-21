@@ -93,6 +93,7 @@ export function AuthorityTraceEventBlock({
             >
               <span className="min-w-0 flex-1">
                 <span className="font-medium">{label}</span>
+                <span> · KI-Entwurf</span>
                 {detail ? <span> {detail}</span> : null}
               </span>
               <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-700 group-hover:text-emerald-800">
@@ -103,6 +104,7 @@ export function AuthorityTraceEventBlock({
           ) : (
             <>
               <span className="font-medium">{label}</span>
+              <span> · KI-Entwurf</span>
               {detail ? <span> {detail}</span> : null}
               {event.isStreaming ? <span>...</span> : null}
             </>

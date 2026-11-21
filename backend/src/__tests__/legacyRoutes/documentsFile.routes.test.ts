@@ -11,12 +11,27 @@ const mocks = vi.hoisted(() => ({
   loadActiveVersion: vi.fn(),
 }));
 
+// Gate B4 audit finding N5: how many pending document_edits rows
+// aiDraftConfirmationState sees. 0 by default (every pre-existing test in
+// this file expects the unconfirmed-download path to be unaffected).
+let pendingEditsCount = 0;
+// Gate B4 audit finding N15: per-version_id override, for tests that need
+// different versions of the same document to carry different pending-edit
+// counts (aiDraftConfirmationState scopes the query to version_id, not
+// document_id). null means "fall back to the flat pendingEditsCount above".
+let pendingEditsCountByVersion: Record<string, number> | null = null;
+
 const database = {
-  from: vi.fn(() => {
+  from: vi.fn((table: string) => {
     const query: Record<string, unknown> = {};
-    for (const method of ["select", "eq"]) {
+    let versionIdFilter: string | undefined;
+    for (const method of ["select", "order"]) {
       query[method] = vi.fn(() => query);
     }
+    query.eq = vi.fn((column: string, value: string) => {
+      if (table === "document_edits" && column === "version_id") versionIdFilter = value;
+      return query;
+    });
     query.single = vi.fn(async () => ({
       data: {
         id: "document-1",
@@ -27,6 +42,20 @@ const database = {
       },
       error: null,
     }));
+    if (table === "document_edits") {
+      // aiDraftConfirmationState never calls .single(); it awaits the
+      // select/eq/order chain itself and reads the pending edit id rows
+      // off { data }.
+      query.then = (resolve: (value: unknown) => unknown) => {
+        const count = pendingEditsCountByVersion
+          ? (pendingEditsCountByVersion[versionIdFilter ?? ""] ?? 0)
+          : pendingEditsCount;
+        const rows = Array.from({ length: count }, (_, i) => ({
+          id: `edit-${i + 1}`,
+        }));
+        return Promise.resolve({ data: rows, error: null }).then(resolve);
+      };
+    }
     return query;
   }),
 };
@@ -72,6 +101,8 @@ app.use("/single-documents", documentsRouter);
 describe("GET /single-documents/:documentId/file", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    pendingEditsCount = 0;
+    pendingEditsCountByVersion = null;
     mocks.ensureDocAccess.mockResolvedValue({ ok: true, isCreator: true });
     mocks.loadActiveVersion.mockResolvedValue({
       id: "version-2",
@@ -158,5 +189,364 @@ describe("GET /single-documents/:documentId/file", () => {
 
     expect(response.status).toBe(404);
     expect(mocks.loadActiveVersion).not.toHaveBeenCalled();
+  });
+
+  // Gate B4 audit finding L3.
+  describe("documents with unresolved AI-proposed changes", () => {
+    beforeEach(() => {
+      pendingEditsCount = 1;
+      mocks.loadActiveVersion.mockResolvedValue({
+        id: "version-2",
+        storage_path: "documents/user-1/document-1/source.docx",
+        pdf_storage_path: null,
+        version_number: 2,
+        filename: "brief.docx",
+        source: "assistant_edit",
+        file_type: "docx",
+        size_bytes: 3,
+        page_count: null,
+      });
+      mocks.headFile.mockResolvedValue({
+        size: 3,
+        etag: '"etag"',
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    });
+
+    it("refuses the download with 409 without explicit confirmation", async () => {
+      const response = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("unresolved_ai_edits");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+      expect(mocks.downloadFile).not.toHaveBeenCalled();
+    });
+
+    it("serves a watermarked file once the caller confirms the AI draft", async () => {
+      const w_ns =
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      zip.file(
+        "word/document.xml",
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+          `<w:document ${w_ns}><w:body><w:p><w:r><w:t>Original.</w:t></w:r></w:p></w:body></w:document>`,
+      );
+      const original = await zip.generateAsync({ type: "arraybuffer" });
+      mocks.downloadFile.mockResolvedValue(original);
+
+      // Gate B4 audit finding N5: the confirm_token comes from the 409
+      // itself — it is not a value the client can guess or hardcode.
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      expect(refusal.status).toBe(409);
+      const confirmToken = refusal.body.confirm_token as string;
+      expect(confirmToken).toMatch(/^[0-9a-f]{64}$/);
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
+        .set("Authorization", "Bearer test")
+        .buffer(true)
+        .parse((res, callback) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => callback(null, Buffer.concat(chunks)));
+        });
+
+      expect(response.status).toBe(200);
+      expect(mocks.downloadFile).toHaveBeenCalledWith(
+        "documents/user-1/document-1/source.docx",
+      );
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+      const stampedZip = await JSZip.loadAsync(response.body as Buffer);
+      const xml = await stampedZip.file("word/document.xml")!.async("string");
+      expect(xml).toContain("KI-ENTWURF");
+      expect(xml).toContain("Original.");
+    });
+
+    // Gate B4 audit finding N5: a stale token must not be replayable once
+    // the document's pending-edit set changes.
+    it("rejects a confirm_token computed before a new pending edit landed", async () => {
+      const before = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      const staleToken = before.body.confirm_token as string;
+
+      pendingEditsCount = 2; // a second edit landed
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${staleToken}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.confirm_token).not.toBe(staleToken);
+    });
+
+    // Gate B4 audit finding N6: fail-closed, not fail-open.
+    it("refuses with 409 rather than serving unstamped when stamping fails", async () => {
+      mocks.downloadFile.mockResolvedValue(null); // stampAiDraftWatermark never gets bytes
+
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      const confirmToken = refusal.body.confirm_token as string;
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("stamping_failed");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+    });
+
+    it("downloads unchanged once no changes are pending", async () => {
+      pendingEditsCount = 0;
+
+      const response = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(200);
+      expect(mocks.createFileReadStream).toHaveBeenCalledWith(
+        "documents/user-1/document-1/source.docx",
+      );
+      expect(mocks.downloadFile).not.toHaveBeenCalled();
+    });
+  });
+
+  // Gate B4 audit finding N15: the confirmation check must look at the
+  // version actually being delivered (?version_id), not always the
+  // document's current active version.
+  describe("a caller requests a specific, non-active version_id", () => {
+    const CLEAN_ACTIVE = {
+      id: "version-active",
+      storage_path: "documents/user-1/document-1/active.docx",
+      pdf_storage_path: null,
+      version_number: 3,
+      filename: "brief.docx",
+      source: "user_upload",
+      file_type: "docx",
+      size_bytes: 3,
+      page_count: null,
+    };
+    const OLD_DRAFT = {
+      id: "version-old-draft",
+      storage_path: "documents/user-1/document-1/old-draft.docx",
+      pdf_storage_path: null,
+      version_number: 1,
+      filename: "brief.docx",
+      source: "generated",
+      file_type: "docx",
+      size_bytes: 3,
+      page_count: null,
+      ai_draft: true,
+    };
+
+    beforeEach(() => {
+      mocks.loadActiveVersion.mockImplementation(
+        async (_documentId: string, _db: unknown, versionId?: string | null) =>
+          versionId === OLD_DRAFT.id ? OLD_DRAFT : CLEAN_ACTIVE,
+      );
+      mocks.headFile.mockResolvedValue({
+        size: 3,
+        etag: '"etag"',
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+    });
+
+    it("refuses an old draft version with 409, even though the active version is clean", async () => {
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?version_id=${OLD_DRAFT.id}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("unresolved_ai_edits");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+    });
+
+    it("downloads the clean active version unchanged, with no confirmation required", async () => {
+      const response = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(200);
+      expect(mocks.createFileReadStream).toHaveBeenCalledWith(CLEAN_ACTIVE.storage_path);
+    });
+
+    // Gate B4 audit finding N23: /file no longer exempts purpose=display
+    // for AI drafts. The in-app viewer loads /display instead.
+    it("?purpose=display still refuses an unapproved draft (N23)", async () => {
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?version_id=${OLD_DRAFT.id}&purpose=display`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("unresolved_ai_edits");
+      expect(mocks.createFileReadStream).not.toHaveBeenCalled();
+    });
+
+    it("does not let a pending edit against the active version block a clean old version's download", async () => {
+      pendingEditsCountByVersion = { [CLEAN_ACTIVE.id]: 1, [OLD_DRAFT.id]: 0 };
+      // The old version here has no ai_draft flag of its own in this case.
+      mocks.loadActiveVersion.mockImplementation(
+        async (_documentId: string, _db: unknown, versionId?: string | null) =>
+          versionId === OLD_DRAFT.id ? { ...OLD_DRAFT, ai_draft: false } : CLEAN_ACTIVE,
+      );
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?version_id=${OLD_DRAFT.id}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(200);
+      expect(mocks.createFileReadStream).toHaveBeenCalledWith(OLD_DRAFT.storage_path);
+    });
+  });
+
+  // Gate B4 audit finding N16: PDFs are stamped the same way .docx is;
+  // every other format gets a filename prefix since there is no way to
+  // inject a visible banner into those bytes.
+  describe("confirmed drafts in formats other than .docx", () => {
+    beforeEach(() => {
+      pendingEditsCount = 1;
+    });
+
+    it("stamps a confirmed PDF with the AI-draft banner", async () => {
+      mocks.loadActiveVersion.mockResolvedValue({
+        id: "version-2",
+        storage_path: "documents/user-1/document-1/source.pdf",
+        pdf_storage_path: null,
+        version_number: 2,
+        filename: "brief.pdf",
+        source: "assistant_edit",
+        file_type: "pdf",
+        size_bytes: 3,
+        page_count: null,
+      });
+      mocks.headFile.mockResolvedValue({
+        size: 3,
+        etag: '"etag"',
+        contentType: "application/pdf",
+      });
+      const { PDFDocument } = await import("pdf-lib");
+      const pdf = await PDFDocument.create();
+      pdf.addPage([200, 200]);
+      const original = Buffer.from(await pdf.save());
+      mocks.downloadFile.mockResolvedValue(original);
+
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      expect(refusal.status).toBe(409);
+      const confirmToken = refusal.body.confirm_token as string;
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
+        .set("Authorization", "Bearer test")
+        .buffer(true)
+        .parse((res, callback) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => callback(null, Buffer.concat(chunks)));
+        });
+
+      expect(response.status).toBe(200);
+      const stampedPdf = await PDFDocument.load(response.body as Buffer);
+      expect(stampedPdf.getPageCount()).toBe(1);
+      expect((response.body as Buffer).byteLength).toBeGreaterThan(original.byteLength);
+    });
+
+    it("refuses a confirmed PDF with 409 rather than serving it unstamped when stamping fails", async () => {
+      mocks.loadActiveVersion.mockResolvedValue({
+        id: "version-2",
+        storage_path: "documents/user-1/document-1/source.pdf",
+        pdf_storage_path: null,
+        version_number: 2,
+        filename: "brief.pdf",
+        source: "assistant_edit",
+        file_type: "pdf",
+        size_bytes: 3,
+        page_count: null,
+      });
+      mocks.headFile.mockResolvedValue({ size: 3, etag: '"etag"', contentType: "application/pdf" });
+      mocks.downloadFile.mockResolvedValue(Buffer.from("not a real pdf"));
+
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      const confirmToken = refusal.body.confirm_token as string;
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("stamping_failed");
+    });
+
+    it("prefixes the filename with [KI-ENTWURF] for a confirmed xlsx, since it cannot be stamped", async () => {
+      mocks.loadActiveVersion.mockResolvedValue({
+        id: "version-2",
+        storage_path: "documents/user-1/document-1/source.xlsx",
+        pdf_storage_path: null,
+        version_number: 2,
+        filename: "financials.xlsx",
+        source: "assistant_edit",
+        file_type: "xlsx",
+        size_bytes: 3,
+        page_count: null,
+      });
+      mocks.headFile.mockResolvedValue({
+        size: 3,
+        etag: '"etag"',
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+
+      const refusal = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+      const confirmToken = refusal.body.confirm_token as string;
+
+      const response = await request(app)
+        .get(`/single-documents/document-1/file?confirm_token=${confirmToken}`)
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(200);
+      expect(response.headers["content-disposition"]).toContain("filename=\"[KI-ENTWURF] financials");
+      expect(mocks.downloadFile).not.toHaveBeenCalled(); // streamed, not stamped
+    });
+
+    it("does not prefix the filename for an unconfirmed-but-clean xlsx", async () => {
+      pendingEditsCount = 0;
+      mocks.loadActiveVersion.mockResolvedValue({
+        id: "version-2",
+        storage_path: "documents/user-1/document-1/source.xlsx",
+        pdf_storage_path: null,
+        version_number: 2,
+        filename: "financials.xlsx",
+        source: "user_upload",
+        file_type: "xlsx",
+        size_bytes: 3,
+        page_count: null,
+      });
+      mocks.headFile.mockResolvedValue({
+        size: 3,
+        etag: '"etag"',
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+
+      const response = await request(app)
+        .get("/single-documents/document-1/file")
+        .set("Authorization", "Bearer test");
+
+      expect(response.status).toBe(200);
+      expect(response.headers["content-disposition"]).toContain("financials.xlsx");
+      expect(response.headers["content-disposition"]).not.toContain("KI-ENTWURF");
+    });
   });
 });

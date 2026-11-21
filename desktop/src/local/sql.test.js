@@ -4,11 +4,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { splitStatements, runSqlFile, TRANSACTION_BLOCK_ERROR } = require("./sql");
 
-// The migration that broke every existing installation's upgrade: main's
+// The migration that broke every existing installation's upgrade: upstream
 // 20260921_01 (PR #505) drops/creates indexes CONCURRENTLY, which Postgres
 // refuses inside the implicit transaction the simple protocol wraps a
-// multi-statement query in.
-const MIGRATION = path.join(__dirname, "..", "..", "..", "backend", "migrations", "20260921_01_chat_activity.sql");
+// multi-statement query in. This fork's numbered 0094_chat_activity.sql is
+// the same change without CONCURRENTLY, so the splitter is pinned to a
+// fixture that keeps the CONCURRENTLY shape.
+const MIGRATION = path.join(__dirname, "concurrent-migration.fixture.sql");
 
 test("splitStatements keeps dollar-quoted bodies, strings and comments intact", () => {
   const sql = `
@@ -35,7 +37,7 @@ test("splitStatements keeps dollar-quoted bodies, strings and comments intact", 
   assert.equal(parts[4], "drop index concurrently if exists idx");
 });
 
-test("the real CONCURRENTLY migration splits into whole statements", () => {
+test("a CONCURRENTLY migration splits into whole statements", () => {
   const parts = splitStatements(fs.readFileSync(MIGRATION, "utf8"));
   const concurrent = parts.filter((p) => /concurrently/i.test(p));
   assert.equal(concurrent.length, 2);

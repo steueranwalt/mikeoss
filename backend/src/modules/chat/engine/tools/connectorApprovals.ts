@@ -38,6 +38,9 @@ import {
   loadAssistantMessage,
 } from "../contextBuilders";
 import { TOOL_ERROR_MESSAGE } from "../types";
+import { applyTrackedEditsToDocument } from "../../../documents/documents.service";
+import type { EditInput } from "../../../../lib/docxTrackedChanges";
+import { writeProjectDocument } from "./projectDocumentWrites";
 
 /** Tool output replayed to the model after an approved call, per call. */
 export const MAX_APPROVAL_RESULT_CHARS = 4_000;
@@ -69,6 +72,152 @@ function isApprovalItem(
   item: AskInputsEvent["items"][number],
 ): item is ConnectorApprovalItem {
   return item.kind === "approval";
+}
+
+/**
+ * Gate B4 audit finding N11: runs an approved write_project_document
+ * overwrite, replaying the exact filename/content the user reviewed.
+ * Nothing changes about the existing document until this runs.
+ */
+async function executeApprovedDocumentOverwrite(
+  item: ConnectorApprovalItem & {
+    binding: Extract<ConnectorApprovalItem["binding"], { type: "document_overwrite" }>;
+  },
+  userId: string,
+  db: Db,
+): Promise<{ content: string; event: McpToolEvent }> {
+  const baseEvent = {
+    type: "mcp_tool_call" as const,
+    connector_id: "",
+    connector_name: item.connector_name,
+    tool_name: item.tool_name,
+    openai_tool_name: item.tool_name,
+  };
+  const args = item.arguments as { filename?: unknown; content?: unknown; project_id?: unknown };
+  if (typeof args.filename !== "string" || typeof args.content !== "string") {
+    return {
+      content: JSON.stringify({ ok: false, error: "Invalid approval payload." }),
+      event: { ...baseEvent, status: "error", error: "Invalid approval payload." },
+    };
+  }
+  // Gate B4 audit finding N18-rest: an empty version_id is not "skip the
+  // stale check" — refuse the same way a legacy document_edit binding is.
+  if (!item.binding.version_id) {
+    const error = "This approval is from an older version of Mike and can no longer be applied. Ask the model to propose the overwrite again.";
+    return {
+      content: JSON.stringify({ ok: false, error }),
+      event: { ...baseEvent, status: "error", error },
+    };
+  }
+  const result = await writeProjectDocument(
+    {
+      filename: args.filename,
+      content: args.content,
+      userId,
+      projectId: typeof args.project_id === "string" ? args.project_id : null,
+      approved: true,
+      // Gate B4 audit finding N18: pins the active version the binding
+      // captured at request time — a document that moved on since is
+      // refused (approval_stale) rather than silently overwritten.
+      expectedVersionId: item.binding.version_id,
+    },
+    db,
+  );
+  if (!result.ok) {
+    return {
+      content: JSON.stringify(result),
+      event: { ...baseEvent, status: "error", error: result.detail },
+    };
+  }
+  return {
+    content: JSON.stringify(result),
+    event: { ...baseEvent, status: "ok" },
+  };
+}
+
+/**
+ * Gate B4 audit finding L4: runs an approved edit_document call, replaying
+ * the exact edits the user reviewed (item.arguments.edits) — never a fresh
+ * read of whatever the model might ask for now. This is the only place an
+ * approved document edit actually touches the document; until this runs,
+ * nothing proposed by edit_document has changed anything.
+ *
+ * Unlike the live-turn edit_document path, this runs after the original
+ * streaming turn has ended, so there is no turnEditState/docIndex to update
+ * and no in-turn version reuse: multiple edits to the same document
+ * approved together each produce their own version, not one collapsed
+ * version. The result is reported as a generic connector-style event
+ * (writeApprovedConnectorFrames), not the richer live "doc_edited" card.
+ */
+async function executeApprovedDocumentEdit(
+  item: ConnectorApprovalItem & {
+    binding: Extract<ConnectorApprovalItem["binding"], { type: "document_edit" }>;
+  },
+  userId: string,
+  db: Db,
+): Promise<{ content: string; event: McpToolEvent }> {
+  const baseEvent = {
+    type: "mcp_tool_call" as const,
+    connector_id: "",
+    connector_name: item.connector_name,
+    tool_name: item.tool_name,
+    openai_tool_name: item.tool_name,
+  };
+  const rawEdits = Array.isArray((item.arguments as { edits?: unknown }).edits)
+    ? ((item.arguments as { edits: unknown[] }).edits as Record<string, unknown>[])
+    : [];
+  const edits: EditInput[] = rawEdits.map((e) => ({
+    find: String(e.find ?? ""),
+    replace: String(e.replace ?? ""),
+    context_before: String(e.context_before ?? ""),
+    context_after: String(e.context_after ?? ""),
+    reason: e.reason ? String(e.reason) : undefined,
+  }));
+  if (!edits.length) {
+    return {
+      content: JSON.stringify({ ok: false, error: "No edits to apply." }),
+      event: { ...baseEvent, status: "error", error: "No edits to apply." },
+    };
+  }
+  // Gate B4 audit finding N13: a legacy approval item requested before this
+  // field existed has no version to pin — reviewing it again, rather than
+  // guessing at "the current version", is the only safe option.
+  if (!item.binding.version_id || !item.binding.storage_path) {
+    const error = "This approval is from an older version of Mike and can no longer be applied. Ask the model to propose the edit again.";
+    return {
+      content: JSON.stringify({ ok: false, error }),
+      event: { ...baseEvent, status: "error", error },
+    };
+  }
+  const result = await applyTrackedEditsToDocument({
+    documentId: item.binding.document_id,
+    userId,
+    // See module comment on runApprovedConnectorActions: no caller passes an
+    // email through this path, so only creator/organization document access
+    // applies here, not an email-direct grant.
+    userEmail: null,
+    edits,
+    db,
+    expectedVersion: { id: item.binding.version_id, storagePath: item.binding.storage_path },
+  });
+  if (!result.ok) {
+    return {
+      content: JSON.stringify({ ok: false, error: result.error }),
+      event: { ...baseEvent, status: "error", error: result.error },
+    };
+  }
+  return {
+    content: JSON.stringify({
+      ok: true,
+      document_id: item.binding.document_id,
+      version_id: result.version_id,
+      version_number: result.version_number,
+      download_url: result.download_url,
+      applied: result.annotations.length,
+      errors: result.errors,
+    }),
+    event: { ...baseEvent, status: "ok" },
+  };
 }
 
 /**
@@ -138,7 +287,23 @@ export async function runApprovedConnectorActions(args: {
   for (const item of ask.items.filter(isApprovalItem)) {
     if (!approved.has(item.id)) continue;
     const { content: result, event } =
-      item.binding.type === "google"
+      item.binding.type === "document_edit"
+        ? await executeApprovedDocumentEdit(
+            item as ConnectorApprovalItem & {
+              binding: Extract<ConnectorApprovalItem["binding"], { type: "document_edit" }>;
+            },
+            userId,
+            db,
+          )
+        : item.binding.type === "document_overwrite"
+        ? await executeApprovedDocumentOverwrite(
+            item as ConnectorApprovalItem & {
+              binding: Extract<ConnectorApprovalItem["binding"], { type: "document_overwrite" }>;
+            },
+            userId,
+            db,
+          )
+        : item.binding.type === "google"
         ? item.binding.provider === "google-drive"
           ? await executeApprovedGoogleDriveCall(owner, item, db)
           : await executeApprovedGoogleWorkspaceCall(owner, item, db)

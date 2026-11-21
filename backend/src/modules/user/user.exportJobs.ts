@@ -22,6 +22,7 @@ import { AUDIT_CSV_FILENAME, buildAuditCsv, type AuditQuery } from "../../lib/au
 import { ensureDocAccess } from "../../lib/access";
 import { downloadFilenameForVersion, loadActiveVersion } from "../../lib/documentVersions";
 import { downloadFile, uploadFile } from "../../lib/storage";
+import { aiDraftConfirmationState } from "../documents/documents.service";
 import { type Db, type DbJob } from "../../lib/dbq/types";
 import { buildMemoryArchive } from "../../lib/memory/archive";
 import { NonRetryableJobError } from "../../lib/dbq/runner";
@@ -129,6 +130,11 @@ async function buildDocumentsZipExport(
         if (!access.ok) continue;
         const active = await loadActiveVersion(doc.id, db);
         if (!active) continue;
+        // Gate B4 audit finding N4: this background job has no interactive
+        // confirm_token retry, so an unreviewed AI edit or draft is skipped,
+        // not included unconfirmed — the same fail-closed treatment as a doc
+        // the user can no longer access above.
+        if ((await aiDraftConfirmationState(doc.id, db)) !== null) continue;
         const raw = await downloadFile(active.storage_path);
         if (!raw) continue;
         // Sequential, unlike the sync route's Promise.all: this path exists

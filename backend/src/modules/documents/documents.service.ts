@@ -22,6 +22,7 @@
 export {
     getDocument,
     deleteDocument,
+    getDocumentAiStatus,
 } from "./documents.access";
 
 export {
@@ -30,6 +31,7 @@ export {
     resolveZipExportDocuments,
     getDownloadUrl,
     getFileStreamSource,
+    getTrackedChangesPreviewSource,
 } from "./documents.download";
 
 export {
@@ -37,10 +39,16 @@ export {
     createVersionFromDocument,
     renameVersion,
     deleteVersion,
+    approveAiDraftVersion,
 } from "./documents.versions";
 
 export {
     resolveEdit,
+    checkAiDraftConfirmation,
+    aiDraftConfirmationState,
+    aiDraftConfirmationResponseBody,
+    requireAiDraftConfirmationOrRespond409,
+    type AiDraftConfirmationState,
 } from "./documents.edits";
 
 export {

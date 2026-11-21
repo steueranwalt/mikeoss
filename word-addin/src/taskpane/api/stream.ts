@@ -20,7 +20,7 @@ import {
   terminalErrorFromFrame,
 } from "../lib/wordChatTerminalError";
 import type { ReasoningLevel } from "../lib/wordChatTypes";
-import type { TextCardEvent } from "@mike/contracts";
+import type { TextCardEvent, WordEditApplyMode } from "@mike/contracts";
 
 export interface WordChatDocumentReadEvent {
   type: "doc_read_start" | "doc_read";
@@ -252,7 +252,7 @@ export async function streamAssistant(
     wordDocumentId: string;
     documentName: string;
     wordChatStorage: "cloud" | "local";
-    editApplyMode?: "direct" | "approval";
+    editApplyMode?: WordEditApplyMode;
     signal?: AbortSignal;
   },
   onText: (text: string) => void,

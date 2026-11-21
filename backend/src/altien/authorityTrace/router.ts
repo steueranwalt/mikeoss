@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Router } from "express";
 import { requireAuth } from "../../middleware/auth";
 import { checkProjectAccess } from "../../lib/access";
@@ -10,11 +11,53 @@ import {
   ReviewBindingChangedError,
 } from "./core/reviewService";
 import {
+  AUTHORITY_TRACE_HTML_CSP,
   buildAuditHtml,
   buildReviewHtml,
 } from "./core/htmlExports";
 import { createServerSupabase } from "../../lib/supabase";
+import { withAiDraftFilenamePrefix } from "../../lib/documentVersions";
 import { ZodError } from "zod";
+
+function authorityTraceMemoContentHash(memo: {
+  document_id?: string;
+  filename?: string;
+  segments?: Array<{ text?: string }>;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        document_id: memo.document_id ?? null,
+        filename: memo.filename ?? null,
+        segments: (memo.segments ?? []).map((segment) => segment.text ?? ""),
+      }),
+    )
+    .digest("hex");
+}
+
+function authorityTraceHtmlConfirmToken(
+  runId: string,
+  kind: "review" | "audit",
+  versionId: string,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        run_id: runId,
+        kind,
+        ai_draft: true,
+        version_id: versionId,
+      }),
+    )
+    .digest("hex");
+}
+
+function markAuthorityTraceAiDraft(res: {
+  setHeader: (name: string, value: string) => void;
+}): void {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Mike-Ai-Draft", "1");
+}
 
 export const authorityTraceRouter = Router();
 
@@ -42,7 +85,10 @@ authorityTraceRouter.get("/runs/:runId", async (req, res) => {
     if (!workspace) {
       return res.status(404).json({ detail: "Verification run not found" });
     }
-    return res.json(workspace);
+    // Gate B4 N40 (Nils, 21.11.2026, 01:05 MEZ): Authority Trace is always
+    // an AI draft — JSON, headers, and the panel banner all say so.
+    markAuthorityTraceAiDraft(res);
+    return res.json({ ...workspace, ai_draft: true });
   } catch (err) {
     const detail =
       err instanceof Error ? err.message : "Failed to load verification run";
@@ -96,10 +142,50 @@ for (const exportType of ["review", "audit"] as const) {
           exportType === "review"
             ? buildReviewHtml(workspace, { originalsRequested })
             : buildAuditHtml(workspace, { originalsRequested });
+        const filename = `authority-trace-${run.id}-${exportType}.html`;
+        const memoVersionId =
+          typeof workspace.memo.version_id === "string" &&
+          workspace.memo.version_id
+            ? workspace.memo.version_id
+            : null;
+        // A memo without version_id must not mint a token bound only to
+        // run_id/kind. Bind the confirmation to the memo's content hash.
+        const versionId =
+          memoVersionId ?? authorityTraceMemoContentHash(workspace.memo);
+        const expectedToken = authorityTraceHtmlConfirmToken(
+          run.id,
+          exportType,
+          versionId,
+        );
+        const downloadRequested =
+          req.query.download === "1" || req.query.download === "true";
+        const confirmToken =
+          typeof req.query.confirm_token === "string"
+            ? req.query.confirm_token
+            : undefined;
+        // Gate B4 N35 (Nils, 21.11.2026, 01:05 MEZ): treat like the chat
+        // export. Display is inline with the KI-Entwurf banner and
+        // Cache-Control: no-store. Download/export needs confirmation and
+        // the KI-Entwurf filename marking. Token is bound to the memo version.
+        if (downloadRequested && confirmToken !== expectedToken) {
+          return res.status(409).json({
+            code: "unresolved_ai_edits",
+            detail:
+              "This Authority Trace HTML is an unreviewed AI draft. Confirm the download with the current confirm_token to get it marked as an AI draft.",
+            confirm_token: expectedToken,
+            version_id: versionId,
+            ai_draft: true,
+            pending_edit_ids: [],
+          });
+        }
         res.setHeader("Content-Type", "text/html; charset=utf-8");
+        markAuthorityTraceAiDraft(res);
+        res.setHeader("Content-Security-Policy", AUTHORITY_TRACE_HTML_CSP);
         res.setHeader(
           "Content-Disposition",
-          `attachment; filename="authority-trace-${run.id}-${exportType}.html"`,
+          downloadRequested
+            ? `attachment; filename="${withAiDraftFilenamePrefix(filename)}"`
+            : `inline; filename="${filename}"`,
         );
         return res.send(html);
       } catch (err) {

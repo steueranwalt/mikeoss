@@ -938,12 +938,11 @@ export function useWordTrackedEdits({
       items: WordToolEditItem[],
       persistent: boolean,
     ): Promise<WordToolEditOutcome[]> => {
-      // Gate B4 audit finding L2: direct (unreviewed) apply no longer
-      // exists — applyModeRef.current is always "approval" — so every
-      // batch goes through the review lifecycle unconditionally.
       const keys = items.map(({ blockIndex }) =>
         getEditKey(messageId, blockIndex),
       );
+      // Gate B4 audit finding N13: applyModeRef.current is always
+      // "approval" now — there is no "direct" branch left to take.
       items.forEach(({ blockIndex, edit }) => {
         scheduleReviewEdit(messageId, blockIndex, edit, persistent);
       });
@@ -1062,8 +1061,8 @@ export function useWordTrackedEdits({
         if (!edit.sealed) return;
         const sealedEdit = toRedlineEdit(edit);
         if (!sealedEdit) return;
-        // Gate B4 audit finding L2: direct (unreviewed) apply no longer
-        // exists, so a sealed streamed edit always goes through review.
+        // Gate B4 audit finding N13: applyModeRef.current is always
+        // "approval" now — there is no "direct" branch left to take.
         scheduleReviewEdit(messageId, edit.blockIndex, sealedEdit, persistent);
       });
     },

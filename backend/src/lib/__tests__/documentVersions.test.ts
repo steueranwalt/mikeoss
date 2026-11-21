@@ -4,6 +4,7 @@ import {
     loadActiveVersion,
     attachActiveVersionPaths,
     attachLatestVersionNumbers,
+    pendingAiEditVersionIds,
 } from "../documentVersions";
 
 type Row = Record<string, unknown>;
@@ -92,6 +93,7 @@ describe("loadActiveVersion", () => {
             size_bytes: 1024,
             page_count: 12,
             textless_page_count: 2,
+            ai_draft: false,
         });
     });
 
@@ -171,6 +173,7 @@ describe("loadActiveVersion", () => {
             size_bytes: null,
             page_count: null,
             textless_page_count: null,
+            ai_draft: false,
         });
     });
 });
@@ -260,6 +263,45 @@ describe("attachActiveVersionPaths", () => {
         expect(docs[0].updated_at).toBe("unchanged");
     });
 
+    it("sets unresolved_ai when the active version has pending KI edits (N31)", async () => {
+        const db = makeDb({
+            document_versions: [{ ...FULL_VERSION, ai_draft: false }],
+            document_edits: [
+                { id: "edit-1", version_id: "ver-1", status: "pending" },
+            ],
+        });
+        const [doc] = await attachActiveVersionPaths<TestDoc>(db, [
+            { id: "doc-1", current_version_id: "ver-1" },
+        ]);
+        expect(doc.ai_draft).toBe(false);
+        expect(doc.unresolved_ai).toBe(true);
+    });
+
+    it("sets unresolved_ai for an AI draft even without pending edits (N31)", async () => {
+        const db = makeDb({
+            document_versions: [{ ...FULL_VERSION, ai_draft: true }],
+            document_edits: [],
+        });
+        const [doc] = await attachActiveVersionPaths<TestDoc>(db, [
+            { id: "doc-1", current_version_id: "ver-1" },
+        ]);
+        expect(doc.ai_draft).toBe(true);
+        expect(doc.unresolved_ai).toBe(true);
+    });
+
+    it("leaves unresolved_ai false for a clean human version (N31)", async () => {
+        const db = makeDb({
+            document_versions: [{ ...FULL_VERSION, ai_draft: false }],
+            document_edits: [
+                { id: "edit-1", version_id: "ver-1", status: "accepted" },
+            ],
+        });
+        const [doc] = await attachActiveVersionPaths<TestDoc>(db, [
+            { id: "doc-1", current_version_id: "ver-1" },
+        ]);
+        expect(doc.unresolved_ai).toBe(false);
+    });
+
     it("falls back to 'Untitled document' for blank filenames", async () => {
         const db = makeDb({
             document_versions: [{ ...FULL_VERSION, filename: "   " }],
@@ -287,6 +329,21 @@ describe("attachActiveVersionPaths", () => {
 // ---------------------------------------------------------------------------
 // attachLatestVersionNumbers
 // ---------------------------------------------------------------------------
+
+describe("pendingAiEditVersionIds", () => {
+    it("returns only version ids with pending edits", async () => {
+        const db = makeDb({
+            document_edits: [
+                { id: "e1", version_id: "ver-1", status: "pending" },
+                { id: "e2", version_id: "ver-2", status: "accepted" },
+                { id: "e3", version_id: "ver-3", status: "pending" },
+            ],
+        });
+        await expect(
+            pendingAiEditVersionIds(db, ["ver-1", "ver-2", "ver-3"]),
+        ).resolves.toEqual(new Set(["ver-1", "ver-3"]));
+    });
+});
 
 describe("attachLatestVersionNumbers", () => {
     const versionRow = (

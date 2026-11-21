@@ -14,7 +14,9 @@ rm -rf "$APP"
 mkdir -p "$APP/backend"
 node desktop/scripts/stage-source-notices.mjs "$APP" desktop/local-stack/bin/notices
 cp -R backend/dist "$APP/backend/dist"
-cp backend/package.json backend/pnpm-lock.yaml "$APP/backend/"
+# Workspace yaml carries the lockfile's overrides; copying it makes this
+# directory the workspace root so pnpm does not walk up to desktop/.
+cp backend/package.json backend/pnpm-lock.yaml backend/pnpm-workspace.yaml "$APP/backend/"
 cp -R backend/migrations "$APP/backend/migrations"
-(cd "$APP/backend" && pnpm install --prod --frozen-lockfile --ignore-workspace)
+(cd "$APP/backend" && pnpm install --prod --frozen-lockfile)
 cp -R frontend/out "$APP/backend/public"

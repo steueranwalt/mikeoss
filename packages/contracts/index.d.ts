@@ -60,6 +60,13 @@ export type SourceDocument = {
   subdocuments?: SourceSubdocument[];
   version_id?: string | null;
   version_number?: number | null;
+  /** Gate B4: the version being shown is an unreviewed AI draft. */
+  ai_draft?: boolean;
+  /**
+   * Gate B4 audit finding N27: true when the version has pending AI-proposed
+   * edits or is an unreviewed draft — the same condition /display uses.
+   */
+  unresolved_ai?: boolean;
 };
 
 /**
@@ -154,6 +161,44 @@ export type ConnectorApprovalBinding =
       provider: GoogleWorkspaceProvider | "google-drive";
       grant_id: string;
       etag?: string;
+    }
+  | {
+      /**
+       * Gate B4 audit finding L4: edit_document pauses for approval the
+       * same way a connector write does, instead of applying tracked
+       * changes inline.
+       */
+      type: "document_edit";
+      document_id: string;
+      client_doc_id: string;
+      /**
+       * Gate B4 audit finding N13: the document's active version at the
+       * moment the approval was requested, not just the document id — a
+       * stale-review guard. Absent on legacy approvals requested before this
+       * field existed, which must be reviewed again rather than applied
+       * against whatever is current now.
+       */
+      version_id?: string;
+      storage_path?: string;
+    }
+  | {
+      /**
+       * Gate B4 audit finding N11: write_project_document overwriting a
+       * document it already wrote (a new version of an existing one, not a
+       * brand-new document) pauses for approval the same way edit_document
+       * does.
+       */
+      type: "document_overwrite";
+      document_id: string;
+      /**
+       * Gate B4 audit finding N18: the document's active version at request
+       * time, mirroring document_edit's version_id (N13) — a stale-review
+       * guard, not a hint. Required (not optional, unlike document_edit's):
+       * this binding type was introduced in the same change as this field,
+       * so there is no pre-existing approval item without it to stay
+       * compatible with.
+       */
+      version_id: string;
     };
 
 export type AskInputsEvent = {
@@ -560,11 +605,8 @@ export type AssistantEvent =
 
 export type AssistantErrorCode = "invalid_api_key";
 
-// Gate B4 audit finding N13: "direct" (apply without review) removed from
-// the type — nothing in the application can construct it anymore
-// (parseEditApplyMode in wordChat.routes.ts rejects it, and word-addin's
-// own WordEditApplyMode narrowed the same way), so the shared contract no
-// longer names a capability that does not exist.
+// Gate B4 audit finding N13: narrowed from "direct" | "approval" — every
+// Word edit is reviewed before it reaches the document, never "direct".
 export type WordEditApplyMode = "approval";
 
 export interface WordDocumentEdit {
@@ -576,7 +618,7 @@ export interface WordDocumentEdit {
   formats: string[];
   occurrence?: "all";
   reason?: string;
-  applyMode: "direct" | "approval";
+  applyMode: "approval";
   applyStatus: "proposed" | "applied" | "unmanaged" | "failed";
   resolutionStatus?: WordEditResolutionStatus;
   matchedOccurrences?: number;

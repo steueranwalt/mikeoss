@@ -1003,7 +1003,7 @@ async function persistGeneratedFile(params: {
       size_bytes: buffer.byteLength,
       page_count: null,
       content_sha256: contentSha256(buffer),
-    });
+    }, { aiDraft: true });
   if (verErr || !versionRow) {
     return {
       error: `Failed to record generated document version: ${verErr?.message ?? "unknown"}`,

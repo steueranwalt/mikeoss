@@ -495,6 +495,7 @@ describe("getTabularReviewDetail", () => {
             summary: "yes",
             flag: "green",
         });
+        expect(result.ok && result.data.cells[0].ai_draft).toBe(true);
     });
 });
 

@@ -46,6 +46,7 @@ function happyDb(
             table: "document_versions",
             data: [{ id: "v2", filename: storedFilename, version_number: 3 }],
           },
+          { table: "document_edits", data: [] },
         ]
       : []),
   ]);

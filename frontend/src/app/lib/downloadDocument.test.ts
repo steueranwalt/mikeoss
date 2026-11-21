@@ -16,7 +16,7 @@ it("uses the server filename, downloads bytes and releases the URL", async () =>
     await downloadDocumentFile("doc", null, "fallback.docx");
     await downloadDocumentFile("doc");
     expect(names).toEqual(["server.docx", "fallback.docx", "document"]);
-    expect(getDocumentFile).toHaveBeenCalledWith("doc", "v");
+    expect(getDocumentFile).toHaveBeenCalledWith("doc", "v", undefined);
     expect(document.querySelector('a[download]')).toBeNull();
     vi.runAllTimers();
     expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3);

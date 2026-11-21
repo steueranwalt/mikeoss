@@ -104,6 +104,8 @@ export type AuthorityTraceWorkspace = {
       message: string;
     }>;
   };
+  /** Gate B4 N40: Authority Trace is always an unreviewed AI draft. */
+  ai_draft: boolean;
 };
 
 export async function getAuthorityTraceRun(
@@ -136,28 +138,45 @@ export async function saveAuthorityTraceReview(
 export async function downloadAuthorityTraceExport(
   runId: string,
   kind: "review" | "audit",
-  options: { forceDegraded?: boolean } = {},
+  options: { forceDegraded?: boolean; confirmToken?: string } = {},
 ): Promise<void> {
   const authHeaders = await getAuthHeader();
-  const query = options.forceDegraded ? "?force_degraded=true" : "";
+  const params = new URLSearchParams();
+  // Gate B4 N38: panel export is a download, same confirmation path as chat.
+  params.set("download", "1");
+  if (options.forceDegraded) params.set("force_degraded", "true");
+  if (options.confirmToken) params.set("confirm_token", options.confirmToken);
   const response = await fetch(
-    `${API_BASE}/authority-trace/runs/${encodeURIComponent(runId)}/${kind}.html${query}`,
+    `${API_BASE}/authority-trace/runs/${encodeURIComponent(runId)}/${kind}.html?${params}`,
     { headers: authHeaders, credentials: "include" },
   );
   bounceIfUnauthorized(response);
   if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as {
-      detail?: string;
-    } | null;
+    const payload = (await response.json().catch(() => null)) as Record<
+      string,
+      unknown
+    > | null;
     throw new MikeApiError({
-      message: payload?.detail ?? `Export failed: ${response.status}`,
+      message:
+        typeof payload?.detail === "string"
+          ? payload.detail
+          : `Export failed: ${response.status}`,
       status: response.status,
+      code: typeof payload?.code === "string" ? payload.code : null,
+      details: payload,
     });
   }
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const named = /filename="([^"]+)"/i.exec(disposition)?.[1];
+  const fallback = `authority-trace-${runId}-${kind}.html`;
+  const filename =
+    named?.startsWith("[KI-ENTWURF] ")
+      ? named
+      : `[KI-ENTWURF] ${named ?? fallback}`;
   const blobUrl = URL.createObjectURL(await response.blob());
   const anchor = document.createElement("a");
   anchor.href = blobUrl;
-  anchor.download = `authority-trace-${runId}-${kind}.html`;
+  anchor.download = filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
 }

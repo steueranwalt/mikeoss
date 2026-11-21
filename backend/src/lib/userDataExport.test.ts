@@ -43,13 +43,14 @@ describe("buildUserChatsExport", () => {
     const out = await buildUserChatsExport(db as never, "u1", "u@x.com", null);
 
     expect(out.user).toEqual({ id: "u1", email: "u@x.com" });
+    expect(out.ai_draft_notice).toBe("Enthält KI-Entwürfe, nicht freigegeben");
     expect(out.assistant_chats).toEqual({
-      chats: [{ id: "c1", user_id: "u1", title: "T" }],
-      messages: [{ id: "m1", chat_id: "c1" }],
+      chats: [{ id: "c1", user_id: "u1", title: "T", ai_draft: true }],
+      messages: [{ id: "m1", chat_id: "c1", ai_draft: false }],
     });
     expect(out.tabular_review_chats).toEqual({
-      chats: [{ id: "tc1", review_id: "r1" }],
-      messages: [{ id: "tm1", chat_id: "tc1" }],
+      chats: [{ id: "tc1", review_id: "r1", ai_draft: true }],
+      messages: [{ id: "tm1", chat_id: "tc1", ai_draft: false }],
     });
     expect(typeof out.exported_at).toBe("string");
   });
@@ -99,11 +100,12 @@ describe("buildUserTabularReviewsExport", () => {
 
     const out = await buildUserTabularReviewsExport(db as never, "u1", "u@x.com", null);
 
-    expect(out.tabular_reviews).toEqual([{ id: "r1", user_id: "u1" }]);
-    expect(out.tabular_cells).toEqual([{ id: "cell1", review_id: "r1" }]);
+    expect(out.ai_draft_notice).toBe("Enthält KI-Entwürfe, nicht freigegeben");
+    expect(out.tabular_reviews).toEqual([{ id: "r1", user_id: "u1", ai_draft: true }]);
+    expect(out.tabular_cells).toEqual([{ id: "cell1", review_id: "r1", ai_draft: true }]);
     expect(out.tabular_review_chats).toEqual({
-      chats: [{ id: "tc1", review_id: "r1" }],
-      messages: [{ id: "tm1" }],
+      chats: [{ id: "tc1", review_id: "r1", ai_draft: true }],
+      messages: [{ id: "tm1", ai_draft: false }],
     });
   });
 });
@@ -127,6 +129,7 @@ describe("buildUserAccountExport", () => {
 
     const out = await buildUserAccountExport(db as never, "u1", null, null);
 
+    expect(out.ai_draft_notice).toBe("Enthält KI-Entwürfe, nicht freigegeben");
     expect(out.library_folders).toEqual([
       {
         id: "folder-1",

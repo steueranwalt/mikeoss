@@ -34,7 +34,7 @@ function editRanges(revision: ReviewRevisionPlacement, ins?: string | null, del?
     return owns(del) ? item.ranges.slice(0, split) : item.ranges.slice(split);
 }
 
-export default function DocxRenderer({ bytes, mode, toolbarVisible = true, filename, author, onChange, onSave, onReady, onError }: DocxRendererProps) {
+export default function DocxRenderer({ bytes, mode, toolbarVisible = true, filename, author, chrome = true, onChange, onSave, onReady, onError }: DocxRendererProps) {
     const auth = useOptionalAuth();
     const profile = useOptionalUserProfile();
     const reviewAuthor = author?.trim() || profile?.profile?.displayName?.trim()
@@ -55,7 +55,13 @@ export default function DocxRenderer({ bytes, mode, toolbarVisible = true, filen
     return (
         <div ref={host} className={`${styles.host} relative flex h-full min-h-0 flex-col`} data-docx-renderer="eigenpal"
             data-toolbar-visible={toolbarVisible}
+            data-docx-chrome={chrome ? "true" : "false"}
             onKeyDownCapture={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p" && !chrome) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    return;
+                }
                 if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
                     event.preventDefault();
                     event.stopPropagation();
@@ -75,7 +81,7 @@ export default function DocxRenderer({ bytes, mode, toolbarVisible = true, filen
                 mode={toolbarVisible ? mode : "view"}
                 modules={docxModules}
                 author={reviewAuthor}
-                chrome
+                chrome={chrome}
                 title={filename}
                 onChange={onChange}
                 onSave={onSave}

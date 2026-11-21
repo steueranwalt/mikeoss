@@ -7,6 +7,7 @@ import {
   attachActiveVersionPaths,
   attachLatestVersionNumbers,
   contentSha256,
+  pendingAiEditVersionIds,
 } from "../../lib/documentVersions";
 import {
   deleteFileBestEffort,
@@ -242,12 +243,24 @@ export async function assignOrCopyDocument(
     const { data: srcV } = await db
       .from("document_versions")
       .select(
-        "storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count",
+        "id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, ai_draft",
       )
       .eq("id", doc.current_version_id)
       .single();
     if (!srcV?.storage_path) {
       return { ok: false, kind: "no_active_version" };
+    }
+    const sourceVersionId =
+      typeof srcV.id === "string" ? srcV.id : doc.current_version_id;
+    let copyAiDraft = srcV.ai_draft === true;
+    try {
+      const pendingOnSource = await pendingAiEditVersionIds(db, [
+        sourceVersionId,
+      ]);
+      copyAiDraft =
+        srcV.ai_draft === true || pendingOnSource.has(sourceVersionId);
+    } catch {
+      return { ok: false, kind: "copy_failed" };
     }
 
     const activeVersionFilename =
@@ -306,6 +319,12 @@ export async function assignOrCopyDocument(
           textless_page_count:
             (srcV.textless_page_count as number | null) ?? null,
           content_sha256: contentSha256(srcBytes),
+        }, {
+          // Gate B4 audit finding N25/N32: a copy into a project is still
+          // the same unreviewed AI draft if the source version was one, or
+          // if it still carries pending KI tracked changes that are not
+          // copied as document_edits rows.
+          aiDraft: copyAiDraft,
         });
       const copyVersionRowId = (newV?.id as string | null) ?? null;
       if (newVError || !copyVersionRowId) {

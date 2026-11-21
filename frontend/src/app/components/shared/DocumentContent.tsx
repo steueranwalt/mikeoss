@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { PdfView } from "./views/PdfView";
 import { DocxView } from "./views/DocxView";
 import type { DocxCloseGuard, DocxSaveState } from "./views/DocxRenderer.types";
@@ -15,9 +16,15 @@ import type { Citation, EditAnnotation, PanelDocument } from "./types";
 import { quoteVerificationState } from "../assistant/message/citationVerification";
 import { CaseView } from "../assistant/CaseView";
 import { useResolvedPanelDocument } from "../assistant/useResolvedPanelDocument";
-import type { DocumentVersion } from "@/app/lib/mikeApi";
+import {
+    approveAiDraftVersion,
+    getDocumentAiStatus,
+    getTrackedChangesPreviewUrl,
+    type DocumentVersion,
+} from "@/app/lib/mikeApi";
 import { DocumentTitleRow } from "./DocumentTitleRow";
 import { DocumentAnnotationLayer } from "./DocumentAnnotationLayer";
+import { AiDraftBanner } from "./AiDraftBanner";
 import { resolveDocumentViewType } from "@/app/lib/documentViewType";
 
 /**
@@ -126,6 +133,9 @@ export function DocumentContent({
         return () => observer.disconnect();
     }, []);
     const [saveState, setSaveState] = useState<DocxSaveState | null>(null);
+    const [approvedDraftKey, setApprovedDraftKey] = useState<string | null>(
+        null,
+    );
     const onSaveStateChange = useCallback(
         (_documentId: string, state: DocxSaveState | null) =>
             setSaveState(state),
@@ -147,12 +157,99 @@ export function DocumentContent({
     } = useResolvedPanelDocument(document);
 
     const documentId = resolvedDocument.document_id;
-    const versionId = resolvedDocument.version_id ?? null;
+    const versionId =
+        resolvedDocument.version_id ??
+        (mode.kind === "edit" ? mode.edit.version_id : null) ??
+        null;
+    const draftKey = `${documentId}:${versionId ?? ""}`;
+    const [serverAiDraft, setServerAiDraft] = useState(false);
+    const [fetchedAiStatus, setFetchedAiStatus] = useState<{
+        key: string;
+        ai_draft: boolean;
+        unresolved_ai: boolean;
+    } | null>(null);
+    const [aiStatusFailedKey, setAiStatusFailedKey] = useState<string | null>(
+        null,
+    );
+    useEffect(() => {
+        if (!documentId || documentId.startsWith("case:") || !versionId) {
+            setFetchedAiStatus(null);
+            setAiStatusFailedKey(null);
+            return;
+        }
+        let cancelled = false;
+        void getDocumentAiStatus(documentId, versionId)
+            .then((status) => {
+                if (!cancelled) {
+                    setFetchedAiStatus({
+                        key: `${documentId}:${versionId}`,
+                        ai_draft: status.ai_draft,
+                        unresolved_ai: status.unresolved_ai,
+                    });
+                    setAiStatusFailedKey(null);
+                }
+            })
+            .catch(() => {
+                // Gate B4 N39: a failed /ai-status must not fall through to
+                // DocxView's /file (409). Fail closed to stamped /display.
+                if (!cancelled) {
+                    setFetchedAiStatus(null);
+                    setAiStatusFailedKey(`${documentId}:${versionId}`);
+                }
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [documentId, versionId]);
+    // Gate B4 N17/N27/N30: banner and stamped PDF from the version's AI
+    // status, open edits, or /display's X-Mike-Ai-Draft. The viewer queries
+    // the server rather than trusting flags the panel document happened to
+    // carry (chat tabs often omit them).
+    const needsAiStatus =
+        Boolean(documentId) &&
+        !documentId.startsWith("case:") &&
+        Boolean(versionId);
+    const statusMatches = fetchedAiStatus?.key === draftKey;
+    const aiStatusFailed = aiStatusFailedKey === draftKey;
+    const aiStatusPending = needsAiStatus && !statusMatches && !aiStatusFailed;
+    const isUnresolvedAi =
+        aiStatusFailed ||
+        resolvedDocument.ai_draft === true ||
+        resolvedDocument.unresolved_ai === true ||
+        (statusMatches && fetchedAiStatus.ai_draft === true) ||
+        (statusMatches && fetchedAiStatus.unresolved_ai === true) ||
+        serverAiDraft;
+    const showAiDraft =
+        (isUnresolvedAi || mode.kind === "edit") &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
     const isCase = resolvedDocument.type === "case";
     const viewType = resolveDocumentViewType({
         filename: resolvedDocument.title,
         fileType: resolvedDocument.type,
     });
+    // Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ): EditCard inline Tracked
+    // Changes is a narrow display-only exception. Dedicated preview route;
+    // no download/export; editor is read-only (N36).
+    const useTrackedChangesPreview =
+        !aiStatusFailed &&
+        isUnresolvedAi &&
+        mode.kind === "edit" &&
+        viewType === "docx" &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
+    const useStampedPdfViewer =
+        isUnresolvedAi &&
+        !useTrackedChangesPreview &&
+        approvedDraftKey !== draftKey &&
+        !!versionId;
+    const trackedChangesPreviewUrl = useTrackedChangesPreview
+        ? getTrackedChangesPreviewUrl(
+              documentId,
+              versionId,
+              mode.kind === "edit" ? mode.edit.edit_id : null,
+          )
+        : null;
     const citation = mode.kind === "citation" ? mode.citation : null;
     const firstSelectableQuoteIndex =
         mode.kind === "citation"
@@ -244,11 +341,30 @@ export function DocumentContent({
                         compactActions={compactActions ?? narrow}
                         saveState={saveState}
                         onVersionChange={onVersionChange}
-                        onDownload={() => localDownload.current?.()}
+                        onDownload={
+                            showAiDraft
+                                ? undefined
+                                : () => localDownload.current?.()
+                        }
                         toolbarVisible={toolbarVisible}
                         onToggleToolbar={
-                            viewType === "docx" && canEdit
+                            viewType === "docx" &&
+                            canEdit &&
+                            !useStampedPdfViewer &&
+                            !useTrackedChangesPreview
                                 ? () => setToolbarVisible((visible) => !visible)
+                                : undefined
+                        }
+                        showAiDraft={showAiDraft}
+                        onApproveDraft={
+                            showAiDraft && canEdit && versionId
+                                ? async () => {
+                                      await approveAiDraftVersion(
+                                          documentId,
+                                          versionId,
+                                      );
+                                      setApprovedDraftKey(draftKey);
+                                  }
                                 : undefined
                         }
                     />
@@ -301,6 +417,7 @@ export function DocumentContent({
                     ) : undefined
                 }
             >
+                {showAiDraft && <AiDraftBanner />}
                 {isCase ? (
                     <CaseView
                         document={resolvedDocument}
@@ -311,18 +428,51 @@ export function DocumentContent({
                         onRetry={retryDocument}
                         onClearQuote={() => setActiveCitationQuoteId(null)}
                     />
+                ) : aiStatusPending ? (
+                    <div
+                        role="status"
+                        aria-label="Loading document"
+                        className="flex h-full min-h-[12rem] items-center justify-center"
+                    >
+                        <Loader2
+                            aria-hidden="true"
+                            className="h-7 w-7 animate-spin text-muted-foreground"
+                        />
+                    </div>
+                ) : useStampedPdfViewer || viewType === "pdf" ? (
+                    <PdfView
+                        refetchKey={refetchKey}
+                        doc={{
+                            document_id: documentId,
+                            version_id: versionId,
+                        }}
+                        rounded={false}
+                        quotes={active ? activeViewerQuotes : undefined}
+                        quoteFocusKey={quoteFocusKey}
+                        onAiDraftStatus={setServerAiDraft}
+                    />
                 ) : viewType === "docx" ? (
                     <DocxView
-                        onDownloadReady={handleDownloadReady}
+                        onDownloadReady={
+                            useTrackedChangesPreview
+                                ? undefined
+                                : handleDownloadReady
+                        }
                         onSaveStateChange={onSaveStateChange}
-                        cacheBytes={cacheBytes}
+                        cacheBytes={
+                            useTrackedChangesPreview ? false : cacheBytes
+                        }
+                        displayUrl={trackedChangesPreviewUrl}
                         refetchKey={refetchKey}
                         onCloseGuardReady={onCloseGuardReady}
-                        defaultMode="edit"
-                        canEdit={canEdit}
+                        defaultMode={useTrackedChangesPreview ? "view" : "edit"}
+                        canEdit={useTrackedChangesPreview ? false : canEdit}
                         // Read-only while hidden; a permission that resolves
-                        // after mount can still enable editing.
-                        toolbarVisible={canEdit && toolbarVisible}
+                        // after mount can still enable editing. Preview is
+                        // locked (N36): no toolbar, no save, no exportDocx.
+                        toolbarVisible={
+                            !useTrackedChangesPreview && canEdit && toolbarVisible
+                        }
                         filename={resolvedDocument.title}
                         documentId={documentId}
                         versionId={versionId ?? undefined}
@@ -356,6 +506,7 @@ export function DocumentContent({
                         rounded={false}
                         quotes={active ? activeViewerQuotes : undefined}
                         quoteFocusKey={quoteFocusKey}
+                        onAiDraftStatus={setServerAiDraft}
                     />
                 )}
             </DocumentAnnotationLayer>

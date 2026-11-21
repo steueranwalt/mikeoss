@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DocumentTitleRow } from "./DocumentTitleRow";
+
+vi.mock("@/app/lib/downloadDocument", () => ({
+    downloadDocumentFile: vi.fn().mockResolvedValue(undefined),
+}));
 import type { PanelDocument } from "./types";
 import type { DocxSaveState } from "./views/DocxRenderer.types";
 
@@ -76,4 +80,37 @@ it("reports a save failure in a warning popup that returns if a retry fails agai
     expect(screen.getByRole("alert")).toHaveTextContent(
         "Your changes could not be saved.",
     );
+});
+
+it("ignores the live viewer download for an AI draft and goes through the server export (N24)", async () => {
+    const onDownload = vi.fn().mockResolvedValue(undefined);
+    render(
+        <DocumentTitleRow
+            document={document}
+            isReloading={false}
+            compactActions
+            showAiDraft
+            onDownload={onDownload}
+        />,
+    );
+    await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    });
+    expect(onDownload).not.toHaveBeenCalled();
+});
+
+it("shows the KI-Entwurf badge and approve-draft action for an unreviewed draft", () => {
+    const onApproveDraft = vi.fn().mockResolvedValue(undefined);
+    render(
+        <DocumentTitleRow
+            document={document}
+            isReloading={false}
+            compactActions
+            showAiDraft
+            onApproveDraft={onApproveDraft}
+        />,
+    );
+    expect(screen.getByText("KI-Entwurf")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Approve draft" }));
+    expect(onApproveDraft).toHaveBeenCalledOnce();
 });

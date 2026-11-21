@@ -407,7 +407,7 @@ export function AssistantSidePanel({
                         actions: {
                             ...actions,
                             onRename: permissions(tab.document.document_id).canEdit ? actions?.onRename : undefined,
-                            onDownload: isLegalSource ? undefined : () => viewers.download(tab.id, tab.document.document_id, tab.document.version_id, tab.document.title),
+                            onDownload: isLegalSource ? undefined : () => viewers.download(tab.id, tab.document.document_id, tab.document.version_id, tab.document.title, tab.document.ai_draft === true || tab.document.unresolved_ai === true || tab.kind === "edit"),
                             onDelete: permissions(tab.document.document_id).canDelete ? actions?.onDelete : undefined,
                         },
                     };

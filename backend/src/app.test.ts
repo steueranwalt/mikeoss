@@ -22,6 +22,28 @@ describe("isStaticAsset (general rate-limit exemption)", () => {
     });
 });
 
+it("allows the preview-ticket header on CORS preflight from an allowed origin (N51)", async () => {
+    const previous = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = "https://app.example.test";
+    try {
+        const app = buildApp();
+        const response = await request(app)
+            .options("/api/single-documents/doc/tracked-changes-preview")
+            .set("Origin", "https://app.example.test")
+            .set("Access-Control-Request-Method", "GET")
+            .set("Access-Control-Request-Headers", "x-mike-preview-ticket");
+        expect(response.headers["access-control-allow-origin"]).toBe(
+            "https://app.example.test",
+        );
+        expect(
+            (response.headers["access-control-allow-headers"] ?? "").toLowerCase(),
+        ).toContain("x-mike-preview-ticket");
+    } finally {
+        if (previous === undefined) delete process.env.FRONTEND_URL;
+        else process.env.FRONTEND_URL = previous;
+    }
+});
+
 it("permits configured Word add-in CORS preflights and rejects other origins", async () => {
     const previous = process.env.WORD_ADDIN_URL;
     process.env.WORD_ADDIN_URL = "https://word.example.test";

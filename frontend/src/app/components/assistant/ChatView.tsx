@@ -475,6 +475,8 @@ export function AssistantChatColumn({
             versionId: string | null;
             versionNumber: number | null;
             fileType?: string | null;
+            ai_draft?: boolean;
+            unresolved_ai?: boolean;
         }) => {
             // The download card's click is the same question the citation
             // pill asks, and it was answered with a bare `return`: a card
@@ -493,6 +495,8 @@ export function AssistantChatColumn({
                 quotes: [],
                 version_id: args.versionId,
                 version_number: args.versionNumber,
+                ai_draft: args.ai_draft,
+                unresolved_ai: args.unresolved_ai,
             });
             if (resolution.status !== "resolved") {
                 reportUnresolvedDocument(resolution.status);
@@ -516,6 +520,8 @@ export function AssistantChatColumn({
                 versionId: document.current_version_id ?? null,
                 versionNumber: document.active_version_number ?? null,
                 fileType: document.file_type,
+                ai_draft: document.ai_draft,
+                unresolved_ai: document.unresolved_ai,
             });
         },
         [openDocument],

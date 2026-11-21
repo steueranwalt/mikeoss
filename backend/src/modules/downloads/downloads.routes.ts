@@ -59,20 +59,32 @@ export const blobUploadHandler = asyncRoute(async (req, res) => {
 });
 
 // GET /download/:token
+//
+// Gate B4 audit finding N4: these tokens never expire, so an AI-draft or
+// unresolved-tracked-change document is re-checked on every redemption via
+// ?confirm_token, the same gate documents /file and /url use.
 downloadsRouter.get("/:token", requireAuth, asyncRoute(async (req, res) => {
     const userId = res.locals.userId as string;
     const userEmail = res.locals.userEmail as string | undefined;
+    const confirmToken =
+        typeof req.query.confirm_token === "string" ? req.query.confirm_token : undefined;
     const db = createServerSupabase();
     const result = await resolveTokenDownload(db, {
         token: req.params.token,
         userId,
         userEmail,
+        confirmToken,
     });
-    if (!result.ok)
+    if (!result.ok) {
+        if (result.kind === "confirmation_required")
+            return void res.status(409).json(result.body);
+        if (result.kind === "stamping_failed")
+            return void res.status(409).json({ code: "stamping_failed", detail: result.detail });
         return void res.status(404).json({
             detail:
                 result.kind === "invalid_link" ? "Invalid link" : "File not found",
         });
+    }
 
     res.setHeader("Content-Type", result.contentType);
     res.setHeader(

@@ -265,6 +265,32 @@ describe("assistant document-edit lifecycle", () => {
     ]);
     fake.done();
   });
+  // Gate B4 audit finding N10: a follow-up version inherits ai_draft from
+  // the version it replaces — editing an AI draft does not clear the flag.
+  it("inherits ai_draft from the version being edited", async () => {
+    mocks.active.mockResolvedValue({
+      id: "active",
+      filename: "Renamed.docx",
+      storage_path: "current",
+      ai_draft: true,
+    });
+    const fake = newVersionDb();
+    const result = await run(fake.db);
+    expect(result).toMatchObject({ ok: true });
+    expect(fake.rpc.mock.calls[0][1].p_version).toMatchObject({
+      ai_draft: true,
+    });
+    fake.done();
+  });
+  it("does not mark a follow-up version a draft when the edited version was not one", async () => {
+    const fake = newVersionDb(); // mocks.active has no ai_draft -> falsy
+    const result = await run(fake.db);
+    expect(result).toMatchObject({ ok: true });
+    expect(fake.rpc.mock.calls[0][1].p_version).toMatchObject({
+      ai_draft: false,
+    });
+    fake.done();
+  });
   it("does not activate a new version if saving its edits fails", async () => {
     const fake = newVersionDb({ editsFail: true });
     expect(await run(fake.db)).toEqual({
