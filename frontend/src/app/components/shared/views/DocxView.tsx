@@ -11,6 +11,7 @@ import type { DocxCloseGuard, DocxMode, DocxSaveState, DocxSurface } from "./Doc
 import type { CitationQuote } from "../types";
 import { WarningPopup } from "@/app/components/popups/WarningPopup";
 import { viewRoundingClass, type ViewRounding } from "./viewRounding";
+import styles from "./DocxView.module.css";
 
 const DocxRenderer = lazy(() => import("./EigenpalDocxRenderer"));
 const RENDER_ERROR = "This document could not be displayed. Please download it to view it.";
@@ -94,6 +95,9 @@ function DocxViewContent(props: Props) {
     const [initialMode] = useState<DocxMode>(props.defaultMode ?? "view");
     const [downloading, setDownloading] = useState(false);
     const [downloadError, setDownloadError] = useState<string | null>(null);
+    // Gate B4 N36: a displayUrl (tracked-changes preview, catalog preview)
+    // is display-only. Ctrl+S / onSave must not exportDocx+downloadBlob.
+    const displayOnly = Boolean(displayUrl);
     const fetched = useFetchDocxBytes(documentId, versionId, refetchKey, displayUrl, cacheBytes);
     // Metadata refreshes after an autosave must not remount the editor, lose
     // its undo stack, or discard edits typed while the upload was in flight.
@@ -152,7 +156,8 @@ function DocxViewContent(props: Props) {
     const onReady = useCallback((surface: DocxSurface) => {
         const firstMount = surfaceRef.current?.content !== surface.content
             || surfaceRef.current?.scroll !== surface.scroll;
-        surfaceRef.current = surface;
+        const locked = displayOnly ? { ...surface, exportDocx: undefined } : surface;
+        surfaceRef.current = locked;
         setReadyKey(renderKey);
         setFailedKey(null);
         // Repeated ready notifications must not move the caret viewport
@@ -162,13 +167,13 @@ function DocxViewContent(props: Props) {
             surface.scroll.scrollTop = lastScrollTop.current;
         }
         propsRef.current.onReady?.();
-    }, [renderKey, focusSurface]);
+    }, [displayOnly, renderKey, focusSurface]);
     const onError = useCallback(() => setFailedKey(renderKey), [renderKey]);
     const onChange = useCallback(() => {
-        if (props.canEdit === false || !surfaceRef.current?.content.isConnected) return;
+        if (displayOnly || props.canEdit === false || !surfaceRef.current?.content.isConnected) return;
         setEditedBytes(bytes);
         markChanged();
-    }, [bytes, markChanged, props.canEdit]);
+    }, [bytes, displayOnly, markChanged, props.canEdit]);
     const download = useCallback(async (providedBytes?: ArrayBuffer) => {
         const surface = surfaceRef.current;
         if (!surface?.exportDocx || downloading) return;
@@ -187,16 +192,31 @@ function DocxViewContent(props: Props) {
         }
     }, [downloading]);
     useEffect(() => {
+        if (displayOnly) {
+            onDownloadReady?.(null);
+            return () => onDownloadReady?.(null);
+        }
         if (readyKey !== renderKey || failedKey === renderKey) return;
         onDownloadReady?.(download);
         return () => onDownloadReady?.(null);
-    }, [onDownloadReady, readyKey, renderKey, failedKey, download]);
+    }, [displayOnly, onDownloadReady, readyKey, renderKey, failedKey, download]);
     const quoteKey = JSON.stringify(props.quotes ?? []);
     useEffect(() => {
         if (surfaceRef.current && readyKey === renderKey && bytes) {
             focusSurface(surfaceRef.current);
         }
     }, [bytes, readyKey, renderKey, quoteKey, props.quoteFocusKey, props.highlightEdit?.key, focusSurface]);
+    useEffect(() => {
+        if (!displayOnly) return;
+        const blockPrint = (event: KeyboardEvent) => {
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p") {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+        };
+        window.addEventListener("keydown", blockPrint, true);
+        return () => window.removeEventListener("keydown", blockPrint, true);
+    }, [displayOnly]);
 
     const renderError = bytes && failedKey === renderKey ? RENDER_ERROR : null;
     const message = error || renderError;
@@ -205,9 +225,10 @@ function DocxViewContent(props: Props) {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <WarningPopup open={!!downloadError} title="Download failed" message={downloadError} onClose={() => setDownloadError(null)} />
             <div
-                className={`document-canvas relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${viewRoundingClass(rounded)}`}
+                className={`document-canvas relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${viewRoundingClass(rounded)}${displayOnly ? ` ${styles.previewLock}` : ""}`}
                 data-document-id={documentId}
                 data-version-id={versionId ?? ""}
+                data-ai-preview={displayOnly ? "true" : undefined}
                 onScrollCapture={(event) => {
                     const surface = surfaceRef.current;
                     if (!surface || event.target !== surface.scroll) return;
@@ -232,11 +253,16 @@ function DocxViewContent(props: Props) {
                 )}
                 {message && <div role="alert" className="flex h-full items-center justify-center p-5 text-sm text-destructive">{message}</div>}
                 {!onSaveStateChange && <DocxSaveErrorPopup error={saveError} />}
+                {displayOnly && (
+                    <p className={styles.printNotice} data-testid="ai-draft-print-notice">
+                        KI-Entwurf, Druck nur über gestempeltes PDF
+                    </p>
+                )}
                 <div className="docx-view-container min-h-0 flex-1" hidden={!!message}>
                     {bytes && (
                         <DocxRenderBoundary key={renderKey} onError={onError}>
                             <Suspense fallback={null}>
-                                <DocxRenderer bytes={bytes} mode={initialMode} toolbarVisible={props.canEdit === false ? false : props.toolbarVisible} filename={props.filename} author={props.author} onChange={onChange} onSave={displayUrl ? download : autosave.save} onReady={onReady} onError={onError} />
+                                <DocxRenderer bytes={bytes} mode={displayOnly ? "view" : initialMode} toolbarVisible={displayOnly || props.canEdit === false ? false : props.toolbarVisible} chrome={!displayOnly} filename={props.filename} author={props.author} onChange={onChange} onSave={displayOnly ? undefined : autosave.save} onReady={onReady} onError={onError} />
                             </Suspense>
                         </DocxRenderBoundary>
                     )}

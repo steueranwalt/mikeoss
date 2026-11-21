@@ -134,6 +134,10 @@ export interface Document {
   active_version_number?: number | null;
   /** Legacy: max version_number across assistant_edit rows, null if doc is unedited. */
   latest_version_number?: number | null;
+  /** Gate B4: the active version is an unreviewed AI draft. */
+  ai_draft?: boolean;
+  /** Gate B4 N27: pending AI edits or an unreviewed draft. */
+  unresolved_ai?: boolean;
 }
 
 export type PanelDocumentType = SourceDocumentType;
@@ -783,6 +787,8 @@ export interface TabularCell {
   } | null;
   status: "pending" | "generating" | "done" | "error";
   created_at: string;
+  /** Generated tabular cells are unreviewed AI drafts until the review is approved. */
+  ai_draft?: boolean;
 }
 
 export interface TabularReviewRow {
@@ -923,6 +929,7 @@ export interface TabularReviewDetailOut {
   cells: TabularCell[];
   rows: TabularReviewRow[];
   documents: Document[];
+  ai_draft?: boolean;
   /**
    * A generation the server is running *in this process*: present only while
    * the backend still holds the run's frames, which is what makes it

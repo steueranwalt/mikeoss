@@ -26,6 +26,10 @@ const db = {
   rpc: vi.fn(async (name: string) => { expect(name).toBe("renew_db_job"); return { data: true, error: null }; }),
   from: (table: string) => table === "account_erasure_requests"
     ? { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }
+    // Gate B4 audit finding N4: aiDraftConfirmationState's document_edits
+    // lookup — no pending rows, so nothing needs confirmation.
+    : table === "document_edits"
+    ? { select: () => ({ eq: () => ({ eq: () => ({ order: async () => ({ data: [], error: null }) }) }) }) }
     : { select: () => ({ in: async () => ({ data: ["d1", "d2"].map(id => ({ id, user_id: "u1", project_id: null })), error: null }) }) },
 };
 

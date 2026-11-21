@@ -44,6 +44,27 @@ describe("useFetchSingleDoc: content-type branching", () => {
         if (result.current.result?.type === "pdf") {
             expect(new Uint8Array(result.current.result.buffer)).toEqual(bytes);
         }
+        expect(result.current.isAiDraft).toBe(false);
+    });
+
+    it("exposes isAiDraft from X-Mike-Ai-Draft (N27)", async () => {
+        const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+        server.use(
+            http.get("*/api/single-documents/:id/display", () =>
+                new HttpResponse(bytes, {
+                    headers: {
+                        "Content-Type": "application/pdf",
+                        "X-Mike-Ai-Draft": "1",
+                        "Cache-Control": "no-store",
+                    },
+                }),
+            ),
+        );
+
+        const { result } = renderHook(() => useFetchSingleDoc("doc-draft"));
+
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        expect(result.current.isAiDraft).toBe(true);
     });
 
     it("returns a docx result (no buffer) when content-type is NOT application/pdf", async () => {

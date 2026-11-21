@@ -1,5 +1,6 @@
 import type { Chat, Message, WordDocumentEdit } from "../types";
 import type { PersistedWordEditPatch } from "./wordChatTypes";
+import type { WordEditApplyMode } from "./wordChatSettings";
 import { notifyWordChatHistoryChanged } from "./wordChatHistoryEvents";
 
 const DATABASE_NAME = "mike-word-addin";
@@ -114,7 +115,7 @@ export async function createLocalWordDocumentEdit(args: {
   formats: string[];
   occurrence?: "all";
   reason?: string;
-  applyMode: "direct" | "approval";
+  applyMode: WordEditApplyMode;
 }): Promise<WordDocumentEdit> {
   const database = await openDatabase();
   try {

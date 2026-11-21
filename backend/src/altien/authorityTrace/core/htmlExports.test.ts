@@ -139,6 +139,9 @@ describe("Authority Trace exports", () => {
 
     const html = buildReviewHtml(value);
 
+    expect(html).toContain(
+      'http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'"',
+    );
     expect(html).not.toContain('<script>alert("x")</script>');
     expect(html).not.toContain("<img src=x");
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");

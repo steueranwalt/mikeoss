@@ -97,6 +97,40 @@ function httpOk(url, allow = [200]) {
   });
 }
 
+/** Ready only on same-origin GET /login/ with 200. 301/302/500 and a foreign Location are not. */
+function isFrontendLoginReady(status, location, origin) {
+  if (status !== 200) return false;
+  if (!location) return true;
+  try {
+    const resolved = new URL(location, origin);
+    const base = new URL(origin.endsWith("/") ? origin : `${origin}/`);
+    if (resolved.origin !== base.origin) return false;
+    return resolved.pathname === "/login" || resolved.pathname === "/login/";
+  } catch {
+    return false;
+  }
+}
+
+function frontendLoginReady() {
+  return new Promise((resolve) => {
+    const req = http.get(`${FRONTEND_URL}/login/`, (res) => {
+      res.resume();
+      resolve(
+        isFrontendLoginReady(
+          res.statusCode,
+          res.headers.location,
+          FRONTEND_URL,
+        ),
+      );
+    });
+    req.on("error", () => resolve(false));
+    req.setTimeout(2000, () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
 // --- Postgres helpers -------------------------------------------------------
 // The bundled zonky Postgres ships only initdb/pg_ctl/postgres — no psql, no
 // pg_isready — so all SQL goes through the pure-JS `pg` client instead.
@@ -308,7 +342,10 @@ async function startLocalStack(app, status = () => {}) {
     await waitFor("backend", () => httpOk(`${BACKEND_URL}/api/health`));
 
     // Dev serves the static export and runtime /config from the backend.
-    await waitFor("frontend", () => httpOk(`${FRONTEND_URL}/login`, [200, 307, 308]));
+    // /login is also a directory (login/sso), so express.static 301s /login
+    // to /login/. Probe the trailing-slash URL and expect 200 — a 301/302 to
+    // an arbitrary Location is not "frontend ready".
+    await waitFor("frontend", () => frontendLoginReady());
 
     throwIfAborted();
     running = true;
@@ -367,4 +404,5 @@ module.exports = {
   localStackRunning,
   localStackActive,
   hasExited,
+  isFrontendLoginReady,
 };

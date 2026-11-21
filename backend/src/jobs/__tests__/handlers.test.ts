@@ -110,6 +110,14 @@ vi.mock("../../lib/documentVersions", async (importOriginal) => {
     };
 });
 
+// Gate B4 audit finding N4: by default nothing needs confirmation, matching
+// every pre-existing test's expectation that the zip builds unchanged.
+const aiDraftConfirmationState = vi.fn(async (..._a: unknown[]) => null as null | { confirmToken: string });
+vi.mock("../../modules/documents/documents.service", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../../modules/documents/documents.service")>()),
+    aiDraftConfirmationState: (...a: unknown[]) => aiDraftConfirmationState(...a),
+}));
+
 const uploadFile =
     vi.fn<
         (key: string, content: ArrayBuffer, contentType: string) => Promise<void>
@@ -252,6 +260,7 @@ beforeEach(() => {
     buildMemoryArchive.mockReset().mockResolvedValue(Buffer.from("memory-zip"));
     ensureDocAccess.mockReset().mockResolvedValue({ ok: true });
     loadActiveVersion.mockReset().mockResolvedValue(ACTIVE_VERSION);
+    aiDraftConfirmationState.mockReset().mockResolvedValue(null);
 });
 
 describe("handleChatTurnAudit", () => {
@@ -660,6 +669,35 @@ describe("handleExportBuild", () => {
             "u@x.test",
             db,
         );
+    });
+
+    // Gate B4 audit finding N4: this job has no interactive confirm_token
+    // retry, so a document needing confirmation is skipped, not included
+    // unconfirmed.
+    it("skips a document with unresolved AI-proposed changes or an unapproved AI draft", async () => {
+        const db = makeDb([
+            { id: "d1", user_id: "u1", project_id: null },
+            { id: "d2", user_id: "u1", project_id: null },
+        ]);
+        aiDraftConfirmationState.mockImplementation(async (...args: unknown[]) =>
+            args[0] === "d2" ? { confirmToken: "abc" } : null,
+        );
+
+        const out = await handleExportBuild(
+            db as never,
+            JOB("export.build", {
+                userId: "u1",
+                userEmail: "u@x.test",
+                type: "documents-zip",
+                document_ids: ["d1", "d2"],
+            }),
+        );
+        if (!out) throw new Error("Expected published export artifact");
+
+        expect(aiDraftConfirmationState).toHaveBeenCalledWith("d1", db);
+        expect(aiDraftConfirmationState).toHaveBeenCalledWith("d2", db);
+        // Only d1's bytes ever get downloaded — d2 is skipped before downloadFile.
+        expect(downloadFile).toHaveBeenCalledTimes(1);
     });
 
     it("fails a documents-zip job whose documents are all inaccessible", async () => {

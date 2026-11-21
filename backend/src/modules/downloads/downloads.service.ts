@@ -28,6 +28,12 @@ import {
     contentTypeForDocumentType,
     documentSuffix,
 } from "../../lib/documentTypes";
+import {
+    requireAiDraftConfirmationOrRespond409,
+    aiDraftConfirmationResponseBody,
+} from "../documents/documents.service";
+import { withAiDraftFilenamePrefix } from "../../lib/documentVersions";
+import { stampAiDraftBytes, isStampableAiDraftFileType } from "../../lib/aiDraftWatermark";
 
 function contentTypeFor(filename: string): string {
     return contentTypeForDocumentType(documentSuffix(filename));
@@ -91,42 +97,103 @@ export async function storeBlobUpload(args: {
  * storage path is still backed by a live document version the caller can
  * access. Every failure after token verification collapses to "not_found" so
  * a valid-looking token cannot be used to probe for foreign files.
+ *
+ * Gate B4 audit finding N4: these tokens never expire by design (persistent
+ * links stored in chat history), so an AI-draft/unresolved-edit document is
+ * re-checked on every redemption instead — the same `confirm_token` gate as
+ * `/file` and `/url`, keyed off the live document state, not the token's mint
+ * time. A confirmed .docx or .pdf is stamped before it is served (fail-closed:
+ * a stamping failure refuses the download rather than serving it unstamped).
+ * Any other confirmed format (Gate B4 audit finding N16) has no stamping
+ * capability, so it carries the warning in its filename instead.
  */
 export async function resolveTokenDownload(
     db: Db,
-    args: { token: string; userId: string; userEmail: string | undefined },
+    args: {
+        token: string;
+        userId: string;
+        userEmail: string | undefined;
+        confirmToken?: string;
+    },
 ): Promise<
     | { ok: true; bytes: Buffer; contentType: string; filename: string }
     | { ok: false; kind: "invalid_link" | "not_found" }
+    | {
+          ok: false;
+          kind: "confirmation_required";
+          body: ReturnType<typeof aiDraftConfirmationResponseBody>;
+      }
+    | { ok: false; kind: "stamping_failed"; detail: string }
 > {
     const info = verifyDownload(args.token);
     if (!info) return { ok: false, kind: "invalid_link" };
 
     const { data: version } = await db
         .from("document_versions")
-        .select("id, document_id")
+        .select("id, document_id, file_type")
         .eq("storage_path", info.path)
         .is("deleted_at", null)
         .maybeSingle();
     if (!version) return { ok: false, kind: "not_found" };
+    const { id: tokenVersionId, document_id: documentId, file_type: fileType } = version as {
+        id: string;
+        document_id: string;
+        file_type: string | null;
+    };
 
     const { data: doc } = await db
         .from("documents")
         .select("id, user_id, project_id, org_id, workflow_id")
-        .eq("id", (version as { document_id: string }).document_id)
+        .eq("id", documentId)
         .single();
     if (!doc) return { ok: false, kind: "not_found" };
 
     const access = await ensureDocAccess(doc, args.userId, args.userEmail, db);
     if (!access.ok) return { ok: false, kind: "not_found" };
 
+    // Gate B4 audit finding N15: checked against the exact version this
+    // token's storage_path resolved to — this token may have been minted
+    // against an older version than the document's current one, and that
+    // older version's own draft/pending-edit state is what actually matters
+    // for the bytes this route is about to serve.
+    const confirmation = await requireAiDraftConfirmationOrRespond409(
+        documentId,
+        args.confirmToken,
+        db,
+        tokenVersionId,
+    );
+    if (!confirmation.proceed) {
+        return { ok: false, kind: "confirmation_required", body: confirmation.body };
+    }
+
     const raw = await downloadFile(info.path);
     if (!raw) return { ok: false, kind: "not_found" };
 
+    if (confirmation.state && isStampableAiDraftFileType(fileType)) {
+        try {
+            const stamped = await stampAiDraftBytes(fileType, Buffer.from(raw));
+            return {
+                ok: true,
+                bytes: stamped,
+                contentType: contentTypeFor(info.filename),
+                filename: info.filename,
+            };
+        } catch {
+            return {
+                ok: false,
+                kind: "stamping_failed",
+                detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+            };
+        }
+    }
+
+    // Gate B4 audit finding N16: a confirmed draft in a format with no
+    // stamping capability (xlsx, pptx, csv, ...) at least carries the
+    // warning in its filename.
     return {
         ok: true,
         bytes: Buffer.from(raw),
         contentType: contentTypeFor(info.filename),
-        filename: info.filename,
+        filename: confirmation.state ? withAiDraftFilenamePrefix(info.filename) : info.filename,
     };
 }

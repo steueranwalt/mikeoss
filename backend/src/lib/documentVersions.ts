@@ -44,6 +44,19 @@ interface VersionPathRow extends DocRow {
     size_bytes?: number | null;
     page_count?: number | null;
     textless_page_count?: number | null;
+    /**
+     * Gate B4 audit finding L4: true while the active version is a
+     * model-authored draft (generate_docx/excel/ppt, write_project_document)
+     * no human has approved yet. The frontend's document list/detail views
+     * show this as a visible "AI draft" indicator.
+     */
+    ai_draft?: boolean | null;
+    /**
+     * Gate B4 audit finding N31: true when the active version is an
+     * unreviewed AI draft or still has pending document_edits. Same
+     * condition /display and the viewer banner use.
+     */
+    unresolved_ai?: boolean | null;
 }
 
 export interface ActiveVersion {
@@ -53,6 +66,8 @@ export interface ActiveVersion {
     version_number: number | null;
     filename: string | null;
     source: string | null;
+    /** Gate B4 audit finding N10: carried into a follow-up version's own ai_draft. */
+    ai_draft?: boolean | null;
     file_type: string | null;
     size_bytes: number | null;
     page_count: number | null;
@@ -86,7 +101,7 @@ export async function loadActiveVersion(
     const { data: v } = await db
         .from("document_versions")
         .select(
-            "id, document_id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count",
+            "id, document_id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, ai_draft",
         )
         .eq("id", targetVersionId)
         .is("deleted_at", null)
@@ -97,6 +112,7 @@ export async function loadActiveVersion(
         storage_path: v.storage_path as string,
         pdf_storage_path: (v.pdf_storage_path as string | null) ?? null,
         version_number: (v.version_number as number | null) ?? null,
+        ai_draft: (v.ai_draft as boolean | null) ?? false,
         filename: (v.filename as string | null) ?? null,
         source: (v.source as string | null) ?? null,
         file_type: (v.file_type as string | null) ?? null,
@@ -114,6 +130,16 @@ export async function loadActiveVersion(
  * Shared by the download routes and the "documents-zip" export job, which
  * must name the entries in the zip exactly as the sync route does.
  */
+/**
+ * Gate B4 audit finding N16: for a confirmed AI-draft/unresolved-edit
+ * download whose file type has no banner-stamping capability (anything but
+ * .docx/.pdf — xlsx, pptx, csv, ...), the filename is the only place left to
+ * carry the warning once the bytes leave this response.
+ */
+export function withAiDraftFilenamePrefix(filename: string): string {
+    return `[KI-ENTWURF] ${filename}`;
+}
+
 export function downloadFilenameForVersion(
     filename: string | null | undefined,
     versionNumber: number | null,
@@ -133,6 +159,34 @@ export function downloadFilenameForVersion(
  * regardless of list size. Documents with no current_version_id retain
  * null paths.
  */
+/**
+ * Gate B4 audit finding N31/N32: version ids that still have pending
+ * `document_edits`. A failed read is a refusal, not "there are none" —
+ * treating an error as an empty set would let a copy or list hide
+ * unresolved KI changes.
+ */
+export async function pendingAiEditVersionIds(
+    db: Supa,
+    versionIds: string[],
+): Promise<Set<string>> {
+    if (versionIds.length === 0) return new Set();
+    const { data, error } = await db
+        .from("document_edits")
+        .select("version_id")
+        .in("version_id", versionIds)
+        .eq("status", "pending");
+    if (error) {
+        throw error instanceof Error
+            ? error
+            : new Error("Failed to read pending document_edits");
+    }
+    return new Set(
+        ((data ?? []) as { version_id: string | null }[])
+            .map((row) => row.version_id)
+            .filter((id): id is string => typeof id === "string"),
+    );
+}
+
 export async function attachActiveVersionPaths<T extends VersionPathRow>(
     db: Supa,
     docs: T[],
@@ -152,13 +206,15 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             d.page_count = null;
             d.textless_page_count = null;
             d.content_sha256 = null;
+            d.ai_draft = false;
+            d.unresolved_ai = false;
         }
         return docs;
     }
     const { data: rows } = await db
         .from("document_versions")
         .select(
-            "id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, content_sha256",
+            "id, storage_path, pdf_storage_path, version_number, filename, source, file_type, size_bytes, page_count, textless_page_count, content_sha256, ai_draft",
         )
         .in("id", versionIds)
         .is("deleted_at", null);
@@ -175,6 +231,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             page_count: number | null;
             textless_page_count: number | null;
             content_sha256: string | null;
+            ai_draft: boolean | null;
         }
     >();
     for (const r of (rows ?? []) as {
@@ -189,6 +246,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
         page_count: number | null;
         textless_page_count: number | null;
         content_sha256: string | null;
+        ai_draft: boolean | null;
     }[]) {
         byId.set(r.id, {
             storage_path: r.storage_path ?? null,
@@ -201,6 +259,7 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
             page_count: r.page_count ?? null,
             textless_page_count: r.textless_page_count ?? null,
             content_sha256: r.content_sha256 ?? null,
+            ai_draft: r.ai_draft ?? null,
         });
     }
     for (const d of docs) {
@@ -215,6 +274,15 @@ export async function attachActiveVersionPaths<T extends VersionPathRow>(
         d.page_count = v?.page_count ?? null;
         d.textless_page_count = v?.textless_page_count ?? null;
         d.content_sha256 = v?.content_sha256 ?? null;
+        d.ai_draft = v?.ai_draft ?? false;
+        d.unresolved_ai = false;
+    }
+    const pending = await pendingAiEditVersionIds(db, [...byId.keys()]);
+    for (const d of docs) {
+        d.unresolved_ai =
+            d.ai_draft === true ||
+            (typeof d.current_version_id === "string" &&
+                pending.has(d.current_version_id));
     }
     return docs;
 }

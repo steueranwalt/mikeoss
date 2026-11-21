@@ -17,13 +17,16 @@ import {
 import { ConfirmPopup } from "@/app/components/popups/ConfirmPopup";
 import { FileTypeIcon } from "@/app/components/shared/FileTypeIcon";
 import { DocumentPaneTitle } from "@/app/components/shared/DocumentPaneTitle";
+import { AiDraftBadge } from "@/app/components/shared/AiDraftBadge";
+import { AiDraftBanner } from "@/app/components/shared/AiDraftBanner";
 import { PdfView } from "@/app/components/shared/views/PdfView";
 import { DocxView } from "@/app/components/shared/views/DocxView";
 import { SpreadsheetView } from "@/app/components/shared/views/SpreadsheetView";
 import { CloseButton } from "@/shared/ui/CloseButton";
 import { PillButtonUI } from "@/shared/ui/PillButtonUI";
+import { TextButtonUI } from "@/shared/ui/TextButtonUI";
 import type { Document } from "@/app/components/shared/types";
-import type { DocumentVersion } from "@/app/lib/mikeApi";
+import { approveAiDraftVersion, type DocumentVersion } from "@/app/lib/mikeApi";
 import { cn } from "@/app/lib/utils";
 import { reportFault,
     UserVisibleError,
@@ -86,6 +89,8 @@ interface DocumentSidePanelProps {
     /** Read-only panels only: copies the document into the caller's collection. */
     onAdd?: (doc: Document) => void;
     addLabel?: string;
+    /** Gate B4 N12: the parent list should drop its KI-Entwurf badge after a successful approve. */
+    onAiDraftApproved?: (documentId: string, versionId: string) => void;
 }
 
 export function DocumentSidePanel({
@@ -110,6 +115,7 @@ export function DocumentSidePanel({
     onDelete,
     onAdd,
     addLabel = "Add",
+    onAiDraftApproved,
 }: DocumentSidePanelProps) {
     const [mounted, setMounted] = useState(false);
     const [uploading, setUploading] = useState(false);
@@ -144,6 +150,8 @@ export function DocumentSidePanel({
     const [mobilePane, setMobilePane] = useState<"document" | "details">(
         "document",
     );
+    const [draftApproved, setDraftApproved] = useState(false);
+    const [approvingDraft, setApprovingDraft] = useState(false);
     const panelRef = useRef<HTMLDivElement>(null);
     // Menus and popups opened from the panel portal outside its DOM, but their
     // events still propagate through the panel's React tree.
@@ -186,6 +194,7 @@ export function DocumentSidePanel({
         setReplaceFile(null);
         setReplaceConfirmOpen(false);
         setMobilePane("document");
+        setDraftApproved(false);
     }, [doc?.id, versionId, currentVersionId]);
 
     useEffect(() => {
@@ -289,6 +298,13 @@ export function DocumentSidePanel({
     );
     const selectedVersionNumber =
         selectedVersion?.version_number ?? doc.active_version_number ?? null;
+    const selectedIsAiDraft =
+        !draftApproved &&
+        (selectedVersion?.ai_draft === true ||
+            (selectedVersion?.ai_draft == null &&
+                (!selectedVersionId ||
+                    selectedVersionId === currentVersionId) &&
+                doc.ai_draft === true));
     const selectedUploadedAt = selectedVersion?.created_at ?? doc.created_at;
     const selectedExtension = filenameExtension(selectedFilename);
     const replaceFileType = replaceTargetVersion
@@ -596,7 +612,49 @@ export function DocumentSidePanel({
                         filename={selectedFilename}
                         fileType={selectedFileType}
                         versionNumber={selectedVersionNumber}
+                        badge={selectedIsAiDraft ? <AiDraftBadge /> : null}
+                        action={
+                            selectedIsAiDraft &&
+                            selectedVersionId &&
+                            !readOnly ? (
+                                <TextButtonUI
+                                    size="xs"
+                                    aria-label="Approve draft"
+                                    title="Approve draft"
+                                    loading={approvingDraft}
+                                    disabled={approvingDraft}
+                                    onClick={() => {
+                                        if (!selectedVersionId || approvingDraft)
+                                            return;
+                                        setApprovingDraft(true);
+                                        void approveAiDraftVersion(
+                                            doc.id,
+                                            selectedVersionId,
+                                        )
+                                            .then(() => {
+                                                setDraftApproved(true);
+                                                onAiDraftApproved?.(
+                                                    doc.id,
+                                                    selectedVersionId,
+                                                );
+                                                void onLoadVersions(doc.id);
+                                            })
+                                            .catch((cause) => {
+                                                notifyError(cause, {
+                                                    action: "approve this draft",
+                                                });
+                                            })
+                                            .finally(() =>
+                                                setApprovingDraft(false),
+                                            );
+                                    }}
+                                >
+                                    Approve draft
+                                </TextButtonUI>
+                            ) : null
+                        }
                     />
+                    {selectedIsAiDraft && <AiDraftBanner />}
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                         {selectedViewType === "spreadsheet" ? (
                             <SpreadsheetView

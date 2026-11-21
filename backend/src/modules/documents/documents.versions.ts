@@ -20,7 +20,11 @@ import {
 } from "../../lib/storage";
 import { convertedPdfKey, docxToPdf } from "../../lib/convert";
 import { enqueueConversion } from "../../lib/queue/conversionQueue";
-import { contentSha256, loadActiveVersion } from "../../lib/documentVersions";
+import {
+    contentSha256,
+    loadActiveVersion,
+    pendingAiEditVersionIds,
+} from "../../lib/documentVersions";
 import { creatorScopedAllowed } from "../../lib/access";
 import { can, DOCUMENT_EDIT_FORBIDDEN } from "../../lib/permissions";
 import {
@@ -58,15 +62,30 @@ export async function listVersions(
     const { data: rows } = await db
         .from("document_versions")
         .select(
-            "id, version_number, source, created_at, filename, file_type, size_bytes, page_count, textless_page_count, deleted_at, deleted_by",
+            "id, version_number, source, created_at, filename, file_type, size_bytes, page_count, textless_page_count, deleted_at, deleted_by, ai_draft",
         )
         .eq("document_id", documentId)
         .order("created_at", { ascending: true });
 
+    const versions = (rows ?? []) as Array<{
+        id: string;
+        ai_draft?: boolean | null;
+        [k: string]: unknown;
+    }>;
+    // Gate B4 audit finding N31: each version row carries unresolved_ai so
+    // chat tabs and the version picker can choose /display without a second
+    // round-trip guessing at pending edits.
+    const pending = await pendingAiEditVersionIds(
+        db,
+        versions.map((row) => row.id),
+    );
     return {
         ok: true,
         current_version_id: access.doc.current_version_id ?? null,
-        versions: rows ?? [],
+        versions: versions.map((row) => ({
+            ...row,
+            unresolved_ai: row.ai_draft === true || pending.has(row.id),
+        })),
     };
 }
 
@@ -178,6 +197,14 @@ export async function createVersionFromDocument(
             kind: "source_no_active",
             detail: "Source document has no active version.",
         };
+    // Gate B4 audit finding N32: a human document can still carry pending
+    // KI tracked changes. Copying only `ai_draft` would mint a clean-looking
+    // version whose bytes still contain those changes and export without a
+    // stamp. Mark the copy a draft (or, if we cannot read pending edits,
+    // refuse the copy).
+    const pendingOnSource = await pendingAiEditVersionIds(db, [active.id]);
+    const copyAiDraft =
+        active.ai_draft === true || pendingOnSource.has(active.id);
     const sourceType = active.file_type ?? "";
 
     const bytes = await downloadFile(active.storage_path);
@@ -276,6 +303,14 @@ export async function createVersionFromDocument(
             page_count: active.page_count,
             textless_page_count: active.textless_page_count,
             content_sha256: contentSha256(bytes),
+        },
+        {
+            // Gate B4 audit finding N21/N32: "adopt as version" carries
+            // the source version's unreviewed AI status forward — both
+            // `ai_draft` and pending tracked changes, because the copied
+            // bytes still contain those changes even when document_edits
+            // rows are not duplicated onto the new version.
+            aiDraft: copyAiDraft,
         },
     );
     if (verErr || !versionRow) {
@@ -385,6 +420,56 @@ export async function renameVersion(
         .is("deleted_at", null)
         .select(
             "id, version_number, source, created_at, filename, file_type, size_bytes, page_count, textless_page_count",
+        )
+        .single();
+    if (error || !updated) {
+        return { ok: false, detail: "Version not found" };
+    }
+    return { ok: true, version: updated };
+}
+
+// ---------------------------------------------------------------------------
+// Gate B4 audit finding L4: human approval of an AI-drafted version
+// ---------------------------------------------------------------------------
+
+/**
+ * Clears `ai_draft` on a version generate_docx/generate_excel/generate_ppt
+ * or write_project_document created — the only action that does. There is
+ * no reverse endpoint: once a human has reviewed a draft, re-marking it
+ * draft again is not a feature this audit asked for.
+ */
+export async function approveAiDraftVersion(
+    params: {
+        documentId: string;
+        versionId: string;
+        userId: string;
+        userEmail: string | undefined;
+    },
+    db: Db,
+): Promise<
+    | { ok: true; version: unknown }
+    | { ok: false; detail: string; status?: number }
+> {
+    const { documentId, versionId, userId, userEmail } = params;
+
+    const access = await ensureDocumentAccess(
+        documentId,
+        userId,
+        userEmail,
+        db,
+    );
+    if (!access.ok) return { ok: false, detail: "Document not found" };
+    if (!can(access.projectRole, "content.edit"))
+        return { ok: false, status: 403, detail: DOCUMENT_EDIT_FORBIDDEN };
+
+    const { data: updated, error } = await db
+        .from("document_versions")
+        .update({ ai_draft: false })
+        .eq("id", versionId)
+        .eq("document_id", documentId)
+        .is("deleted_at", null)
+        .select(
+            "id, version_number, source, created_at, filename, file_type, size_bytes, ai_draft",
         )
         .single();
     if (error || !updated) {

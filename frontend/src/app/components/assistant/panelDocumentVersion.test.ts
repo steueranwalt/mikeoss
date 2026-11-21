@@ -32,7 +32,12 @@ describe("resolvePanelDocumentVersionResult version selection", () => {
             resolvePanelDocumentVersionResult(document, loadVersions),
         ).resolves.toMatchObject({
             status: "resolved",
-            document: { version_id: "version-3", version_number: 3 },
+            document: {
+                version_id: "version-3",
+                version_number: 3,
+                ai_draft: false,
+                unresolved_ai: false,
+            },
         });
     });
 
@@ -134,14 +139,51 @@ describe("resolvePanelDocumentVersionResult", () => {
 
     it("resolves without a request when the version is already known", async () => {
         const loadVersions = vi.fn();
+        const loadAiStatus = vi.fn().mockResolvedValue({
+            ai_draft: false,
+            unresolved_ai: true,
+        });
 
         await expect(
             resolvePanelDocumentVersionResult(
                 { ...document, version_id: "version-9" },
                 loadVersions,
+                loadAiStatus,
             ),
-        ).resolves.toMatchObject({ status: "resolved" });
+        ).resolves.toMatchObject({
+            status: "resolved",
+            document: { unresolved_ai: true, ai_draft: false },
+        });
         expect(loadVersions).not.toHaveBeenCalled();
+        expect(loadAiStatus).toHaveBeenCalledWith("document-1", "version-9");
+    });
+
+    it("copies unresolved_ai from the versions list onto the chat-tab document (N31)", async () => {
+        const loadVersions = vi.fn().mockResolvedValue({
+            current_version_id: "version-3",
+            versions: [
+                {
+                    id: "version-3",
+                    version_number: 3,
+                    source: "assistant_edit",
+                    created_at: "2026-08-18T00:00:00Z",
+                    filename: "agreement.docx",
+                    ai_draft: false,
+                    unresolved_ai: true,
+                },
+            ],
+        });
+
+        await expect(
+            resolvePanelDocumentVersionResult(document, loadVersions),
+        ).resolves.toMatchObject({
+            status: "resolved",
+            document: {
+                version_id: "version-3",
+                unresolved_ai: true,
+                ai_draft: false,
+            },
+        });
     });
 
 });

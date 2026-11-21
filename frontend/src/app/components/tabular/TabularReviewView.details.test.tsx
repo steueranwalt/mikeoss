@@ -9,6 +9,7 @@ import {
 import type { TabularReview } from "@/app/components/shared/types";
 import { TRView } from "./TabularReviewView";
 import { ToastViewportUI } from "@/shared/ui/ToastUI";
+import { exportTabularReviewToExcel } from "./exportToExcel";
 
 const { apiKeyState } = vi.hoisted(() => ({
     apiKeyState: {
@@ -29,6 +30,10 @@ vi.mock("next/navigation", () => ({
     useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
     useSearchParams: () => new URLSearchParams(),
 }));
+vi.mock("./exportToExcel", () => ({
+    exportTabularReviewToExcel: vi.fn(),
+}));
+
 vi.mock("@/app/lib/mikeApi", () => ({
     MikeApiError: class MikeApiError extends Error {},
     clearTabularCells: vi.fn(),
@@ -350,5 +355,41 @@ describe("TabularReviewView details gate", () => {
             ),
         ).toBeInTheDocument();
         expect(updateTabularReview).not.toHaveBeenCalled();
+    });
+
+    it("shows the KI banner and asks before exporting Excel (N42)", async () => {
+        vi.mocked(getTabularReview).mockResolvedValue({
+            review: review({
+                access_role: "editor",
+                columns_config: [{ index: 0, name: "Issue", prompt: "Q?" }],
+            }),
+            cells: [],
+            rows: [
+                {
+                    id: "row-1",
+                    review_id: "r1",
+                    label: "Memo",
+                    row_type: "document",
+                    folder_id: null,
+                    library_folder_id: null,
+                    document_id: "d1",
+                    sort_index: 0,
+                    source_document_ids: ["d1"],
+                },
+            ],
+            documents: [],
+            ai_draft: true,
+        });
+        render(<TRView reviewId="r1" />);
+        expect(
+            await screen.findByText("KI-Entwurf, nicht freigegeben"),
+        ).toBeVisible();
+        await openActionsMenu();
+        fireEvent.click(screen.getByText("Export"));
+        expect(await screen.findByRole("dialog")).toHaveTextContent(
+            "Export AI draft?",
+        );
+        fireEvent.click(screen.getByRole("button", { name: "Export anyway" }));
+        expect(exportTabularReviewToExcel).toHaveBeenCalled();
     });
 });

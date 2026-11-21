@@ -189,6 +189,10 @@ function originalManifest(args: {
   };
 }
 
+/** Gate B4 optional: inline HTML is style-only; JSON is not executable. */
+export const AUTHORITY_TRACE_HTML_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+
 function documentShell(args: {
   title: string;
   landscape?: boolean;
@@ -214,6 +218,7 @@ function documentShell(args: {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${AUTHORITY_TRACE_HTML_CSP}">
 <title>${escapeHtml(args.title)}</title>
 <style>
 @page { size: letter${args.landscape ? " landscape" : ""}; margin: 0.45in; }
@@ -222,6 +227,7 @@ header { border-bottom: 2px solid #172033; margin-bottom: 16px; padding-bottom: 
 h1 { font-size: 22px; margin: 0; } h2 { font-size: 17px; margin: 22px 0 6px; } h3 { font-size: 15px; margin: 18px 0 8px; }
 .integrity { border: 1px solid; margin: 12px 0; padding: 10px; } .ok { background:#ecfdf5; border-color:#6ee7b7; }
 .degraded { background:#fef2f2; border-color:#f87171; color:#991b1b; }
+.ai-draft-banner { background:#7f1d1d; color:#fff; font-weight:600; margin:0 0 16px; padding:10px 12px; }
 table { border-collapse: collapse; width: 100%; } th, td { border:1px solid #cbd5e1; padding:6px; text-align:left; vertical-align:top; }
 th { background:#f1f5f9; } .text { border:1px solid #cbd5e1; padding:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
 mark { background:#fde68a; } .muted { color:#64748b; font-size:12px; } footer { border-top:1px solid #94a3b8; margin-top:18px; padding-top:8px; }
@@ -229,6 +235,7 @@ mark { background:#fde68a; } .muted { color:#64748b; font-size:12px; } footer { 
 </style>
 </head>
 <body>
+<div class="ai-draft-banner" role="status">KI-Entwurf, nicht freigegeben</div>
 ${args.body}
 <footer><strong>Integrity:</strong> ${workspaceIntegritySummary(args.workspace)}<br><span class="muted">${escapeHtml(manifest.note)}</span></footer>
 <script type="application/json" id="authority-trace-data">${embedded}</script>

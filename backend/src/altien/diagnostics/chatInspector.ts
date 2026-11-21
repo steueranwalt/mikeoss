@@ -3,6 +3,7 @@ import { checkProjectAccess } from "../../lib/access";
 import { safeErrorMessage } from "../../lib/safeError";
 import { createServerSupabase } from "../../lib/supabase";
 import { requireAuth } from "../../middleware/auth";
+import { AI_DRAFT_NOTICE, withAiDraftFlag } from "../../lib/aiDraftNotice";
 
 const CHAT_TRACE_LIMIT_MAX = 100;
 const CHAT_TRACE_TEXT_MAX = 20_000;
@@ -190,17 +191,26 @@ chatInspectorRouter.get("/chats/:chatId/trace", requireAuth, async (req, res) =>
         (run) => row.project_id && String(run.project_id ?? "") === row.project_id,
       );
     }
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Mike-Ai-Draft", "1");
     return res.json({
-      chat: row,
-      messages: rawMessages.map((message) => ({
-        id: String(message.id ?? ""),
-        role: String(message.role ?? ""),
-        content: sanitizeChatContent(message.content),
-        annotations: sanitizeAnnotations(message.annotations),
-        created_at: String(message.created_at ?? ""),
-      })),
-      timeline,
-      authority_trace_runs: runs,
+      ai_draft_notice: AI_DRAFT_NOTICE,
+      ai_draft: true,
+      chat: withAiDraftFlag({ ...row }),
+      messages: rawMessages.map((message) => {
+        const role = String(message.role ?? "");
+        return withAiDraftFlag({
+          id: String(message.id ?? ""),
+          role,
+          content: sanitizeChatContent(message.content),
+          annotations: sanitizeAnnotations(message.annotations),
+          created_at: String(message.created_at ?? ""),
+        }, role === "assistant");
+      }),
+      timeline: timeline.map((event) => withAiDraftFlag({ ...event })),
+      authority_trace_runs: (runs as Record<string, unknown>[]).map((run) =>
+        withAiDraftFlag({ ...run }),
+      ),
       truncated: rawMessages.length >= CHAT_TRACE_LIMIT_MAX,
     });
   } catch (error) {

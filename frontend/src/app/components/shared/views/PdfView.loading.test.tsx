@@ -13,6 +13,7 @@ vi.mock("@/app/hooks/useFetchSingleDoc", () => ({
         result: mocks.result,
         loading: false,
         error: null,
+        isAiDraft: false,
     }),
 }));
 vi.mock("./highlightQuote", () => ({

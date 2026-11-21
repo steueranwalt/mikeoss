@@ -1,10 +1,12 @@
 // Read/serve paths for documents: inline display bytes, zip bundling, signed
 // download URLs, and the raw source bytes of a version.
 
-import { getSignedUrl, headFile } from "../../lib/storage";
+import { randomUUID } from "node:crypto";
+import { downloadFile, getSignedUrl, headFile, uploadFile } from "../../lib/storage";
 import {
     attachActiveVersionPaths,
     loadActiveVersion,
+    withAiDraftFilenamePrefix,
 } from "../../lib/documentVersions";
 import { checkProjectAccess, ensureDocAccess } from "../../lib/access";
 import { mapWithConcurrency } from "../../lib/concurrency";
@@ -15,6 +17,15 @@ import {
 } from "../../lib/documentDisplay";
 import { downloadFilenameForVersion, type Db } from "./documents.shared";
 import { ensureDocumentAccess } from "./documents.access";
+import {
+    aiDraftConfirmationState,
+    checkAiDraftConfirmation,
+    type AiDraftConfirmationState,
+} from "./documents.edits";
+import { stampAiDraftBytes, isStampableAiDraftFileType } from "../../lib/aiDraftWatermark";
+import { stampAiDraftDisplayBytes } from "../../lib/aiDraftDisplayStamp";
+import { enqueueDbJob } from "../../lib/dbq/enqueue";
+import { reportError } from "../../lib/observability/sentry";
 
 // ---------------------------------------------------------------------------
 // Display
@@ -28,6 +39,13 @@ import { ensureDocumentAccess } from "./documents.access";
  *
  * A conversion failure throws out of `loadDocumentDisplay`, so it is reported
  * separately from the 404 paths: the route maps it to an internal error.
+ *
+ * Gate B4 audit finding N17 (Nils, 20.11.2026, 22:40 MEZ, binding): /display
+ * is a display, not an export — it never asks for confirmation. An unapproved
+ * AI draft / unresolved-edit version is shown as a stamped PDF (xlsx, csv,
+ * html, images are converted first) or refused. Stamping is fail-closed: a
+ * failure does not fall back to the unstamped original. `isAiDraft` tells
+ * the route to answer with Cache-Control: no-store and X-Mike-Ai-Draft.
  */
 export async function getDisplayableVersion(
     documentId: string,
@@ -36,8 +54,9 @@ export async function getDisplayableVersion(
     versionIdParam: string | null,
     db: Db,
 ): Promise<
-    | { ok: true; display: DocumentDisplayPayload }
+    | { ok: true; display: DocumentDisplayPayload; isAiDraft: boolean }
     | { ok: false; kind: "not_found"; detail: string }
+    | { ok: false; kind: "stamping_failed"; detail: string }
     | { ok: false; kind: "error"; error: unknown }
 > {
     const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
@@ -67,7 +86,30 @@ export async function getDisplayableVersion(
                 kind: "not_found",
                 detail: "Document not found in storage",
             };
-        return { ok: true, display };
+
+        const draftState = await aiDraftConfirmationState(documentId, db, active.id);
+        if (draftState) {
+            try {
+                const stamped = await stampAiDraftDisplayBytes(
+                    display.bytes,
+                    active.file_type,
+                    display.contentType,
+                );
+                display.bytes = stamped;
+                display.contentType = "application/pdf";
+                display.filename = display.filename.toLowerCase().endsWith(".pdf")
+                    ? display.filename
+                    : `${display.filename.replace(/\.[^.]+$/, "") || display.filename}.pdf`;
+            } catch (error) {
+                reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_display_stamp" } });
+                return {
+                    ok: false,
+                    kind: "stamping_failed",
+                    detail: "This document could not be stamped as an AI draft and will not be shown unstamped.",
+                };
+            }
+        }
+        return { ok: true, display, isAiDraft: draftState !== null };
     } catch (error) {
         return { ok: false, kind: "error", error };
     }
@@ -115,6 +157,7 @@ type DownloadDocumentRow = {
     workflow_id?: string | null;
     storage_path?: string | null;
     filename?: string | null;
+    file_type?: string | null;
     source?: string | null;
     active_version_number?: number | null;
 };
@@ -124,6 +167,8 @@ export type ZipExportEntry = {
     storagePath: string;
     filename: string;
     size: number;
+    /** Stamped AI-draft bytes, when confirmation was supplied for this entry. */
+    bytes?: Buffer;
 };
 
 /**
@@ -135,23 +180,39 @@ export type ZipExportEntry = {
  * Returns entries only — the route streams the archive, because that loop is
  * an HTTP concern (it applies backpressure onto `res`).
  */
+/** One document the batch refused because it needed confirmation first (Gate B4 audit finding N4). */
+export type ZipExportConfirmationNeeded = {
+    document_id: string;
+    filename: string;
+    confirm_token: string;
+};
+
 export async function resolveZipExportDocuments(
     params: {
         documentIds: string[];
         folderIds: string[];
         userId: string;
         userEmail: string | undefined;
+        /** Per-document confirm_token from a previous 409, keyed by document id. */
+        confirmTokens?: Record<string, string>;
     },
     db: Db,
 ): Promise<
     | { ok: true; entries: ZipExportEntry[] }
     | { ok: false; kind: "limit"; detail: string }
     | { ok: false; kind: "not_found"; detail: string }
+    // Gate B4 audit finding N4/N26: at least one requested document has
+    // unresolved tracked changes or an unapproved AI draft. A subsequent
+    // request may retry with per-document confirm_tokens from this body's
+    // `documents` list. Fail-closed: the rest of the batch is refused too,
+    // rather than silently shipping a zip with gaps.
+    | { ok: false; kind: "confirmation_required"; documents: ZipExportConfirmationNeeded[] }
+    | { ok: false; kind: "stamping_failed"; detail: string }
     // Database and object-storage failures are opaque to the client: the
     // route hands the raw error to sendInternalError.
     | { ok: false; kind: "internal"; error: unknown }
 > {
-    const { documentIds, folderIds, userId, userEmail } = params;
+    const { documentIds, folderIds, userId, userEmail, confirmTokens } = params;
 
     // Bound the *requested* count before any query runs, so an oversized
     // selection cannot cost a database round-trip.
@@ -319,6 +380,37 @@ export async function resolveZipExportDocuments(
     if (activeDocs.length === 0)
         return { ok: false, kind: "not_found", detail: "No files available" };
 
+    // Gate B4 audit finding N4: every output path checks this, including a
+    // batch export — a draft or edited document does not get a pass just
+    // because it arrived bundled with others.
+    const confirmationStates = await mapWithConcurrency(
+        activeDocs,
+        5,
+        async (doc) => ({ doc, state: await aiDraftConfirmationState(doc.id, db) }),
+    );
+    const confirmedById = new Map<string, AiDraftConfirmationState>();
+    const needsConfirmation = confirmationStates.filter(
+        (entry): entry is { doc: (typeof activeDocs)[number]; state: AiDraftConfirmationState } => {
+            if (!entry.state) return false;
+            if (confirmTokens?.[entry.doc.id] === entry.state.confirmToken) {
+                confirmedById.set(entry.doc.id, entry.state);
+                return false;
+            }
+            return true;
+        },
+    );
+    if (needsConfirmation.length > 0) {
+        return {
+            ok: false,
+            kind: "confirmation_required",
+            documents: needsConfirmation.map(({ doc, state }) => ({
+                document_id: doc.id,
+                filename: doc.filename ?? doc.storage_path,
+                confirm_token: state.confirmToken,
+            })),
+        };
+    }
+
     // HEAD every object to learn the archive's total size before committing to
     // it; bounded concurrency keeps a large selection from opening one request
     // per document at once.
@@ -351,23 +443,79 @@ export async function resolveZipExportDocuments(
     );
     if (sizeLimit) return { ok: false, kind: "limit", detail: sizeLimit };
 
-    return {
-        ok: true,
-        entries: sized.map(({ doc, size }) => ({
+    const entries: ZipExportEntry[] = [];
+    for (const { doc, size } of sized) {
+        let filename = downloadFilenameForVersion(
+            doc.filename,
+            doc.active_version_number ?? null,
+            doc.source === "assistant_edit",
+        );
+        const confirmed = confirmedById.get(doc.id);
+        if (!confirmed) {
+            entries.push({ storagePath: doc.storage_path, filename, size });
+            continue;
+        }
+        if (isStampableAiDraftFileType(doc.file_type)) {
+            try {
+                const original = await downloadFile(doc.storage_path);
+                if (!original) throw new Error("source bytes unavailable");
+                const stamped = await stampAiDraftBytes(doc.file_type, Buffer.from(original));
+                entries.push({
+                    storagePath: doc.storage_path,
+                    filename,
+                    size: stamped.byteLength,
+                    bytes: stamped,
+                });
+            } catch (error) {
+                reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_zip_stamp" } });
+                return {
+                    ok: false,
+                    kind: "stamping_failed",
+                    detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+                };
+            }
+            continue;
+        }
+        entries.push({
             storagePath: doc.storage_path,
-            filename: downloadFilenameForVersion(
-                doc.filename,
-                doc.active_version_number ?? null,
-                doc.source === "assistant_edit",
-            ),
+            filename: withAiDraftFilenamePrefix(filename),
             size,
-        })),
-    };
+        });
+    }
+
+    return { ok: true, entries };
 }
 
 // ---------------------------------------------------------------------------
 // Signed download URL
 // ---------------------------------------------------------------------------
+
+// Gate B4 audit finding N6: a signed URL that needed confirmation points at
+// a throwaway stamped copy, never the original stored object — the
+// original never carries the banner, and nobody holding this URL ever sees
+// it without one.
+const STAMPED_COPY_TTL_SECONDS = 600;
+
+// Gate B4 audit finding N22: comfortably past STAMPED_COPY_TTL_SECONDS — the
+// signed URL itself stops working well before this runs, so there is no
+// client left to race.
+const STAMPED_COPY_CLEANUP_DELAY_SECONDS = 3600;
+
+async function enqueueStampedCopyCleanup(db: Db, storagePath: string): Promise<void> {
+    try {
+        await enqueueDbJob(db, {
+            kind: "storage.cleanup",
+            payload: { keys: [storagePath] },
+            maxAttempts: 100,
+            runAt: new Date(Date.now() + STAMPED_COPY_CLEANUP_DELAY_SECONDS * 1000).toISOString(),
+        });
+    } catch (error) {
+        // Best-effort: deleteDocumentAndVersionFiles's whole-prefix sweep on
+        // document deletion, and the throwaway copy's own short signed-URL
+        // TTL, are both still in effect even if scheduling this job fails.
+        reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp_cleanup" } });
+    }
+}
 
 export async function getDownloadUrl(
     documentId: string,
@@ -375,10 +523,14 @@ export async function getDownloadUrl(
     userEmail: string | undefined,
     versionIdParam: string | null,
     db: Db,
+    /** Gate B4 audit finding N5: the caller's confirm_token, if it sent one. */
+    confirmToken?: string,
 ): Promise<
     | { ok: true; payload: Record<string, unknown> }
     | { ok: false; kind: "not_found"; detail: string }
     | { ok: false; kind: "storage"; detail: string }
+    | { ok: false; kind: "confirmation_required"; state: AiDraftConfirmationState }
+    | { ok: false; kind: "stamping_failed"; detail: string }
 > {
     const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
     if (!access.ok)
@@ -388,12 +540,67 @@ export async function getDownloadUrl(
     if (!active)
         return { ok: false, kind: "not_found", detail: "No file available" };
 
-    const downloadFilename = downloadFilenameForVersion(
+    let downloadFilename = downloadFilenameForVersion(
         active.filename,
         active.version_number,
         active.source === "assistant_edit",
     );
-    const url = await getSignedUrl(active.storage_path, 3600, downloadFilename);
+
+    // One read decides both: whether confirmation is required at all, and
+    // (if the caller is confirmed) whether there is anything left to stamp.
+    // Gate B4 audit finding N15: checked against `active.id` — the version
+    // this response actually hands out, which is `versionIdParam` when the
+    // caller asked for one, not always the document's current version.
+    const draftState = await aiDraftConfirmationState(documentId, db, active.id);
+    if (draftState && confirmToken !== draftState.confirmToken) {
+        return { ok: false, kind: "confirmation_required", state: draftState };
+    }
+
+    let signedStoragePath = active.storage_path;
+    if (draftState && isStampableAiDraftFileType(active.file_type)) {
+        // Gate B4 audit finding N6/N16: fail-closed, not fail-open — a docx
+        // or pdf that needed confirmation and cannot be stamped is refused
+        // outright (stamping_failed) rather than silently handed out as the
+        // original, unstamped object. A file that did not need confirmation
+        // (draftState null: no pending edits, not an AI draft) is untouched.
+        try {
+            const original = await downloadFile(active.storage_path);
+            if (!original) throw new Error("source bytes unavailable");
+            const stamped = await stampAiDraftBytes(active.file_type, Buffer.from(original));
+            const extension = active.file_type === "pdf" ? "pdf" : "docx";
+            signedStoragePath = `exports/ai-draft-stamped/${documentId}/${randomUUID()}.${extension}`;
+            await uploadFile(
+                signedStoragePath,
+                stamped.buffer.slice(stamped.byteOffset, stamped.byteOffset + stamped.byteLength) as ArrayBuffer,
+                active.file_type === "pdf"
+                    ? "application/pdf"
+                    : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            );
+            // Gate B4 audit finding N22: the signed URL only works for
+            // STAMPED_COPY_TTL_SECONDS anyway — this throwaway copy has no
+            // other owner and no other reason to exist past that, so its
+            // cleanup is scheduled right here rather than left to accumulate
+            // until the document itself is deleted (deleteDocumentAndVersionFiles
+            // also sweeps this document's whole exports/ai-draft-stamped/
+            // prefix, for the copy a client never actually fetched in time).
+            await enqueueStampedCopyCleanup(db, signedStoragePath);
+        } catch (error) {
+            reportError(error, { tags: { component: "documents", operation: "documents.ai_draft_stamp" } });
+            return {
+                ok: false,
+                kind: "stamping_failed",
+                detail: "This document could not be stamped as an AI draft and will not be served unstamped.",
+            };
+        }
+    } else if (draftState) {
+        // Gate B4 audit finding N16: no stamping capability for this format
+        // (xlsx, pptx, csv, ...) — the filename is the only place left to
+        // carry the warning.
+        downloadFilename = withAiDraftFilenamePrefix(downloadFilename);
+    }
+
+    const ttl = signedStoragePath === active.storage_path ? 3600 : STAMPED_COPY_TTL_SECONDS;
+    const url = await getSignedUrl(signedStoragePath, ttl, downloadFilename);
     if (!url)
         return { ok: false, kind: "storage", detail: "Storage not configured" };
 
@@ -428,6 +635,15 @@ export async function getFileStreamSource(
     userEmail: string | undefined,
     versionIdParam: string | null,
     db: Db,
+    /** Gate B4 audit finding N5: the caller's confirm_token, if it sent one. */
+    confirmToken?: string,
+    /**
+         * Gate B4 audit finding N23: "export" (default) is a download.
+     * "display" used to skip confirmation so the in-app viewer could read
+     * raw draft bytes. Viewers of AI drafts now load /display instead;
+     * /file no longer makes an exception for purpose=display.
+     */
+    _purpose: "display" | "export" = "export",
 ): Promise<
     | {
           ok: true;
@@ -435,6 +651,8 @@ export async function getFileStreamSource(
           fileType: string | null;
           size: number;
           filename: string;
+          /** Gate B4 audit finding N4/N5: see checkAiDraftConfirmation. */
+          confirmation: Awaited<ReturnType<typeof checkAiDraftConfirmation>>;
       }
     | { ok: false; detail: string }
 > {
@@ -456,5 +674,84 @@ export async function getFileStreamSource(
             active.version_number,
             active.source === "assistant_edit",
         ),
+        confirmation:
+            // Gate B4 audit finding N23: purpose=display is not an exemption
+            // for AI drafts. Gate B4 audit finding N15: checked against
+            // `active.id` — the version actually streamed below.
+            await checkAiDraftConfirmation(documentId, confirmToken, db, active.id),
+    };
+}
+
+/**
+ * Gate B4 N30 (Nils, 21.11.2026, 01:05 MEZ) + N37: display-only exception
+ * so the EditCard can show Tracked Changes inline. Not an export: callers
+ * must not offer download from these bytes. Limited to docx with open
+ * `document_edits` and an edit_id that matches one of them. A pure
+ * `ai_draft` with no pending edits is not a preview.
+ */
+export async function getTrackedChangesPreviewSource(
+    documentId: string,
+    userId: string,
+    userEmail: string | undefined,
+    versionIdParam: string | null,
+    db: Db,
+    editId: string | null,
+): Promise<
+    | {
+          ok: true;
+          storagePath: string;
+          fileType: string | null;
+          size: number;
+          filename: string;
+          versionId: string;
+      }
+    | { ok: false; kind: "not_found"; detail: string }
+    | { ok: false; kind: "unsupported"; detail: string }
+> {
+    const access = await ensureDocumentAccess(documentId, userId, userEmail, db);
+    if (!access.ok) return { ok: false, kind: "not_found", detail: "Document not found" };
+
+    const active = await loadActiveVersion(documentId, db, versionIdParam);
+    if (!active) return { ok: false, kind: "not_found", detail: "No file available" };
+
+    const state = await aiDraftConfirmationState(documentId, db, active.id);
+    if (
+        !state ||
+        state.pendingEditIds.length === 0 ||
+        !editId ||
+        !state.pendingEditIds.includes(editId)
+    ) {
+        return { ok: false, kind: "not_found", detail: "No file available" };
+    }
+
+    const fileType = (active.file_type ?? "").trim().toLowerCase();
+    const filename = (active.filename ?? "").trim().toLowerCase();
+    const isDocx =
+        fileType === "docx" ||
+        fileType === "doc" ||
+        filename.endsWith(".docx") ||
+        filename.endsWith(".doc");
+    if (!isDocx) {
+        return {
+            ok: false,
+            kind: "unsupported",
+            detail: "Tracked-changes preview is limited to Word documents.",
+        };
+    }
+
+    const metadata = await headFile(active.storage_path);
+    if (!metadata) return { ok: false, kind: "not_found", detail: "Document bytes not available" };
+
+    return {
+        ok: true,
+        storagePath: active.storage_path,
+        fileType: active.file_type,
+        size: metadata.size,
+        filename: downloadFilenameForVersion(
+            active.filename,
+            active.version_number,
+            active.source === "assistant_edit",
+        ),
+        versionId: active.id,
     };
 }

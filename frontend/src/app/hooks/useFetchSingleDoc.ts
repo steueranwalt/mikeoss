@@ -55,12 +55,14 @@ export function useFetchSingleDoc(
     const [result, setResult] = useState<DocResult>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [isAiDraft, setIsAiDraft] = useState(false);
 
     useEffect(() => {
         if (!documentId) {
             setResult(null);
             setLoading(false);
             setError(null);
+            setIsAiDraft(false);
             return;
         }
         const controller = new AbortController();
@@ -68,6 +70,7 @@ export function useFetchSingleDoc(
         setLoading(true);
         setError(null);
         setResult(null);
+        setIsAiDraft(false);
 
         let cancelled = false;
         const qs = versionId
@@ -90,6 +93,14 @@ export function useFetchSingleDoc(
                 );
                 if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status, requestId: response.headers.get("x-request-id") });
                 if (cancelled) return;
+
+                const headerDraft = response.headers.get("x-mike-ai-draft");
+                if (!cancelled) {
+                    setIsAiDraft(
+                        headerDraft === "1" ||
+                            response.headers.get("cache-control") === "no-store",
+                    );
+                }
 
                 const contentType = response.headers.get("content-type") ?? "";
                 if (contentType.includes("application/pdf")) {
@@ -119,5 +130,5 @@ export function useFetchSingleDoc(
         };
     }, [displayUrl, documentId, versionId, refetchKey]);
 
-    return { result, loading, error };
+    return { result, loading, error, isAiDraft };
 }

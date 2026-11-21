@@ -185,6 +185,10 @@ export async function extractDocumentForVerification(
       file_type: "md",
       size_bytes: markdownBytes.byteLength,
       page_count: extraction.pageCount,
+  }, {
+      // Gate B4 audit finding N35: verification extractions are model-authored
+      // artefacts, consistent with backfill 0180 and the chat export path.
+      aiDraft: true,
   });
   if (extractedVersionError) throw new Error(extractedVersionError.message);
   const { error: currentVersionError } = await db

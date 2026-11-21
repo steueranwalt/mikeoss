@@ -125,10 +125,11 @@ function parseEditApplyMode(
   if (value === undefined || value === null || value === "approval") {
     return { ok: true, value: "approval" };
   }
-  if (value === "direct") return { ok: true, value: "direct" };
+  // Gate B4 audit finding N13: "direct" (apply without review) is no longer
+  // an accepted value at all.
   return {
     ok: false,
-    detail: 'edit_apply_mode must be "direct" or "approval"',
+    detail: 'edit_apply_mode must be "approval"; direct apply is no longer available (Gate B4)',
   };
 }
 

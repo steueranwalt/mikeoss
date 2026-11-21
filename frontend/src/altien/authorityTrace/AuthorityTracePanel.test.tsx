@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MikeApiError } from "@/app/lib/mikeApi";
 import { renderWithProviders } from "@/test/render";
 import type { AuthorityTraceWorkspace } from "./api";
 
@@ -114,6 +115,7 @@ function workspace(): AuthorityTraceWorkspace {
             ok: true,
             warnings: [],
         },
+        ai_draft: true,
     };
 }
 
@@ -261,7 +263,51 @@ describe("AuthorityTracePanel", () => {
             expect(downloadExportMock).toHaveBeenCalledWith(
                 "run-1",
                 "audit",
-                { forceDegraded: true },
+                { forceDegraded: true, confirmToken: undefined },
+            ),
+        );
+    });
+
+    it("labels the report as an unreviewed KI draft (N40)", async () => {
+        renderWithProviders(<AuthorityTracePanel runId="run-1" />);
+        expect(
+            await screen.findByText("KI-Entwurf, nicht freigegeben"),
+        ).toBeInTheDocument();
+    });
+
+    it("exports HTML through the confirmation dialog with a KI-ENTWURF token (N38)", async () => {
+        downloadExportMock
+            .mockRejectedValueOnce(
+                new MikeApiError({
+                    message: "Confirm the download",
+                    status: 409,
+                    code: "unresolved_ai_edits",
+                    details: {
+                        confirm_token: "token-1",
+                        version_id: "memo-v1",
+                        pending_edit_ids: [],
+                        ai_draft: true,
+                    },
+                }),
+            )
+            .mockResolvedValueOnce(undefined);
+        renderWithProviders(<AuthorityTracePanel runId="run-1" />);
+
+        fireEvent.click(
+            await screen.findByRole("button", { name: "Export review" }),
+        );
+
+        expect(await screen.findByRole("dialog")).toHaveTextContent("memo-v1");
+        expect(screen.getByRole("dialog")).toHaveTextContent("token-1");
+        fireEvent.click(
+            screen.getByRole("button", { name: "Export anyway" }),
+        );
+
+        await waitFor(() =>
+            expect(downloadExportMock).toHaveBeenLastCalledWith(
+                "run-1",
+                "review",
+                { forceDegraded: false, confirmToken: "token-1" },
             ),
         );
     });

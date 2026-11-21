@@ -181,14 +181,17 @@ export async function normalizeDocxZipPaths(buffer: Buffer): Promise<Buffer> {
  * Convert a DOCX/DOC buffer to PDF using LibreOffice.
  * Throws if LibreOffice is not installed or conversion fails.
  */
-export async function docxToPdf(buffer: Buffer): Promise<Buffer> {
+async function runLibreOfficePdfConvert(
+  buffer: Buffer,
+  preprocess: (input: Buffer) => Promise<Buffer> = async (input) => input,
+): Promise<Buffer> {
   if (resolveSofficeBinaryPaths().length === 0) {
     throw converterUnavailable();
   }
   const convert = await getConvert();
-  const normalized = await normalizeDocxZipPaths(buffer);
+  const prepared = await preprocess(buffer);
   try {
-    return await convert(normalized, ".pdf", undefined);
+    return await convert(prepared, ".pdf", undefined);
   } catch (error) {
     if (error instanceof AppError) throw error;
     // The library spawns soffice itself: a spawn failure is the converter
@@ -201,6 +204,23 @@ export async function docxToPdf(buffer: Buffer): Promise<Buffer> {
       { cause: error },
     );
   }
+}
+
+/**
+ * Convert a DOCX/DOC buffer to PDF using LibreOffice.
+ * Throws if LibreOffice is not installed or conversion fails.
+ */
+export async function docxToPdf(buffer: Buffer): Promise<Buffer> {
+  return runLibreOfficePdfConvert(buffer, normalizeDocxZipPaths);
+}
+
+/**
+ * Convert an Office/spreadsheet buffer to PDF using LibreOffice without the
+ * DOCX zip-path rewrite. Used when /display must stamp an AI draft whose
+ * native type is not already a PDF (xlsx and similar).
+ */
+export async function officeBytesToPdf(buffer: Buffer): Promise<Buffer> {
+  return runLibreOfficePdfConvert(buffer);
 }
 
 /**

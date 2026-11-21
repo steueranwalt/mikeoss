@@ -1,21 +1,26 @@
+import type { ReactNode } from "react";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { VersionChip } from "./VersionChip";
 
 /**
  * Title row above a side panel's document view: type, name and version.
- * Fixed at h-11 so the panel's other column can start level with the view.
+ * At least h-11 so the panel's other column can start level with the view.
  */
 export function DocumentPaneTitle({
     filename,
     fileType,
     versionNumber,
+    badge,
+    action,
 }: {
     filename: string;
     fileType?: string | null;
     versionNumber?: number | null;
+    badge?: ReactNode;
+    action?: ReactNode;
 }) {
     return (
-        <div className="flex h-11 shrink-0 items-center gap-2 px-3">
+        <div className="flex min-h-11 shrink-0 items-center gap-2 px-3">
             <FileTypeIcon
                 fileType={fileType || filename}
                 className="h-3.5 w-3.5 shrink-0"
@@ -28,7 +33,9 @@ export function DocumentPaneTitle({
                     {filename}
                 </h2>
                 <VersionChip n={versionNumber} />
+                {badge}
             </div>
+            {action}
         </div>
     );
 }

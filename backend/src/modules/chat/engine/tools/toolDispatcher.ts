@@ -79,7 +79,6 @@ import {
 import { buildDownloadUrl } from "../../../../lib/downloadTokens";
 import { safeErrorLog } from "../../../../lib/safeError";
 import { contentSha256, loadActiveVersion } from "../../../../lib/documentVersions";
-import { type EditInput } from "../../../../lib/docxTrackedChanges";
 import {
   citationReminder,
   generateDocx,
@@ -91,7 +90,6 @@ import {
   readDocumentContent,
   findInDocumentContent,
   findTextMatches,
-  runEditDocument,
   safeGeneratedFilename,
   type DocEditedResult,
   type TurnEditState,
@@ -2009,114 +2007,61 @@ export async function runToolCalls(
           tool_call_id: tc.id,
           content: JSON.stringify({ error: err }),
         });
+      } else if (!options.connectorApprovals) {
+        // Gate B4 audit finding L4: edit_document always needs the user's
+        // approval before it changes a document, the same as a connector
+        // write — on a surface that cannot run an interactive approval
+        // (connectorApprovals false), it cannot run edit_document at all.
+        emitEditError(docInfo.filename, indexed.document_id, APPROVAL_UNAVAILABLE_MESSAGE);
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: APPROVAL_UNAVAILABLE_MESSAGE }),
+        });
       } else {
-        write(
-          `data: ${JSON.stringify({
-            type: "doc_edited_start",
-            filename: docInfo.filename,
-          })}\n\n`,
-        );
-        const edits: EditInput[] = (editsRaw as Record<string, unknown>[]).map(
-          (e) => ({
-            find: String(e.find ?? ""),
-            replace: String(e.replace ?? ""),
-            context_before: String(e.context_before ?? ""),
-            context_after: String(e.context_after ?? ""),
-            reason: e.reason ? String(e.reason) : undefined,
-          }),
-        );
-        const result = await documentLocks.run(indexed.document_id, async () => {
-          signal?.throwIfAborted();
-          const edited = await runEditDocument({
-            documentId: indexed.document_id,
-            userId,
-            userEmail: options.userEmail ?? null,
-            edits,
-            db,
-            reuseVersion: turnEditState?.get(indexed.document_id),
-          });
-          if (edited.ok) {
-            turnEditState?.set(indexed.document_id, {
-              versionId: edited.version_id,
-              versionNumber: edited.version_number,
-              storagePath: edited.storage_path,
-            });
-          }
-          return edited;
-        }, signal);
-
-        if (result.ok) {
-          clearTurnReadsForDocument(turnReadState, indexed.document_id);
-          // Keep the chat-local doc label pointed at the latest
-          // edited version so any follow-up read_document call in
-          // the same assistant turn reads and cites the same bytes.
-          if (docIndex[docId]) {
-            docIndex[docId] = {
-              ...docIndex[docId],
-              version_id: result.version_id,
-              version_number: result.version_number,
-            };
-          }
-          const currentDocStore = docStore.get(docId);
-          if (currentDocStore) {
-            docStore.set(docId, {
-              ...currentDocStore,
-              search_source: undefined,
-              storage_path: result.storage_path,
-            });
-          }
-          const payload: DocEditedResult = {
-            filename: docInfo.filename,
-            document_id: indexed.document_id,
-            version_id: result.version_id,
-            version_number: result.version_number,
-            download_url: result.download_url,
-            annotations: result.annotations,
-          };
-          docsEdited.push(payload);
-          write(
-            `data: ${JSON.stringify({
-              type: "doc_edited",
-              ...payload,
-            })}\n\n`,
-          );
+        // Gate B4 audit finding N13: the binding pins the active version
+        // this moment saw, not just the document id — a stale-review guard,
+        // not a hint. executeApprovedDocumentEdit (connectorApprovals.ts)
+        // passes it on as applyTrackedEditsToDocument's expectedVersion, so
+        // a version that moved on by approval time is refused the same way
+        // a long-running playbook review already is, instead of silently
+        // re-reading and editing whatever happens to be current then.
+        const activeVersionForEdit = await loadActiveVersion(indexed.document_id, db);
+        if (!activeVersionForEdit) {
+          const err = "Document has no file available to edit.";
+          emitEditError(docInfo.filename, indexed.document_id, err);
           toolResults.push({
             role: "tool",
             tool_call_id: tc.id,
-            content: JSON.stringify({
-              ok: true,
-              doc_id: docId,
-              document_id: indexed.document_id,
-              version_id: result.version_id,
-              version_number: result.version_number,
-              applied: result.annotations.length,
-              errors: result.errors,
-              next_required_action: [
-                `The edited document remains available as doc_id "${docId}".`,
-                `Before making factual claims about the edited document's final contents, call read_document with doc_id "${docId}" and base the response on that returned text.`,
-                `Do not include download links or URLs in your prose response; the edited document card is shown automatically by the UI.`,
-                `If you describe specific content from the edited document, cite it with [N] markers and a final <CITATIONS> block using doc_id "${docId}".`,
-              ].join(" "),
-            }),
+            content: JSON.stringify({ error: err }),
           });
         } else {
-          write(
-            `data: ${JSON.stringify({
-              type: "doc_edited",
-              filename: docInfo.filename,
+          // Gate B4 audit finding L4: edit_document pauses for the user's
+          // approval exactly like a connector write — nothing is applied to
+          // the document yet. Approval replays these exact, already-
+          // validated edits through executeApprovedDocumentEdit.
+          approvalItems.push({
+            id: crypto.randomUUID(),
+            kind: "approval",
+            connector_name: docInfo.filename,
+            tool_name: "edit_document",
+            title: `Edit "${docInfo.filename}"`,
+            arguments: { doc_id: docId, edits: editsRaw },
+            binding: {
+              type: "document_edit",
               document_id: indexed.document_id,
-              version_id: "",
-              download_url: "",
-              annotations: [],
-              error: result.error,
-            })}\n\n`,
-          );
+              client_doc_id: docId,
+              version_id: activeVersionForEdit.id,
+              storage_path: activeVersionForEdit.storage_path,
+            },
+          });
           toolResults.push({
             role: "tool",
             tool_call_id: tc.id,
             content: JSON.stringify({
               ok: false,
-              error: result.error,
+              status: "awaiting_approval",
+              message: "Waiting for the user's approval. Nothing has been changed yet.",
             }),
           });
         }
@@ -2307,7 +2252,13 @@ export async function runToolCalls(
                 document_id: d.id,
                 storage_path: newKeys[idx],
                 pdf_storage_path: newPdfKeys[idx],
-                source: "upload",
+                // Gate B4 audit finding N14: 'upload' is also the source
+                // migration 0123's "publish file" RPC gives a genuine human
+                // upload (and several migrations' default for an
+                // unspecified source) — sharing it here made every one of
+                // those indistinguishable from a model-replicated copy.
+                // 'replicated' is unique to this tool.
+                source: "replicated",
                 version_number: 1,
                 filename: d.filename,
                 file_type: active?.file_type ?? sourceInfo.file_type,
@@ -2318,6 +2269,11 @@ export async function runToolCalls(
                 page_count: active?.page_count ?? null,
                 textless_page_count: active?.textless_page_count ?? null,
                 content_sha256: contentSha256(raw),
+                // Gate B4 audit finding N8: a replicated copy is a new,
+                // model-created document the same way generate_docx's or
+                // write_project_document's output is — mark it an AI draft
+                // until a human calls approve-draft.
+                ai_draft: true,
               }));
               const { data: insertedVersions, error: verErr } = await createDocumentVersions(db, versionRows);
               if (
@@ -2502,16 +2458,55 @@ export async function runToolCalls(
         "docx",
       );
     } else if (tc.function.name === "write_project_document") {
+      const writeFilename = args.filename as string;
+      const writeContent = args.content as string;
       const result = await writeProjectDocument(
         {
-          filename: args.filename as string,
-          content: args.content as string,
+          filename: writeFilename,
+          content: writeContent,
           userId,
           projectId: projectId ?? null,
         },
         db,
       );
-      if (!result.ok) {
+      if (!result.ok && result.error === "approval_required" && options.connectorApprovals) {
+        // Gate B4 audit finding N11: nothing is written yet — the approval
+        // item below replays this exact, already-validated filename/content
+        // through executeApprovedDocumentOverwrite once approved.
+        approvalItems.push({
+          id: crypto.randomUUID(),
+          kind: "approval",
+          connector_name: writeFilename,
+          tool_name: "write_project_document",
+          title: `Overwrite "${writeFilename}"`,
+          arguments: { filename: writeFilename, content: writeContent, project_id: projectId ?? null },
+          binding: {
+            type: "document_overwrite",
+            document_id: result.pending_overwrite?.document_id ?? "",
+            // Gate B4 audit finding N18: pins the active version this
+            // moment saw — the approved replay is refused if the document
+            // moved on by then, instead of overwriting whatever is current.
+            version_id: result.pending_overwrite?.version_id ?? "",
+          },
+        });
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            ok: false,
+            status: "awaiting_approval",
+            message: "Waiting for the user's approval. The existing document has not been changed yet.",
+          }),
+        });
+      } else if (!result.ok && result.error === "approval_required") {
+        // Surface's connectorApprovals is unavailable: same fallback as
+        // edit_document on a surface without an interactive approval UI.
+        toolResults.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: JSON.stringify({ ok: false, error: APPROVAL_UNAVAILABLE_MESSAGE }),
+        });
+      } else if (!result.ok) {
         // No document events on a refusal: nothing was written, and a
         // doc_created_start with no doc_created behind it leaves the UI
         // holding a card for a document that will never arrive.

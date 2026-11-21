@@ -54,6 +54,10 @@ vi.mock("next/navigation", () => ({
 }));
 vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
     ...(await importOriginal<typeof import("@/app/lib/mikeApi")>()),
+    getDocumentAiStatus: vi.fn().mockResolvedValue({
+        ai_draft: false,
+        unresolved_ai: false,
+    }),
     getProject: vi.fn().mockResolvedValue({
         id: "p1",
         name: "Matter",

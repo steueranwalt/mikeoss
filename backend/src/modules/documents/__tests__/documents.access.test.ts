@@ -3,7 +3,12 @@ import { scriptedDb } from "../../../__tests__/helpers/scriptedDb";
 import { ensureDocAccess } from "../../../lib/access";
 import { deleteDocument, getDocument } from "../documents.access";
 vi.mock("../../../lib/access", async (load) => ({ ...(await load<object>()), ensureDocAccess: vi.fn() }));
-vi.mock("../../../lib/documentVersions", () => ({ attachActiveVersionPaths: vi.fn(), attachLatestVersionNumbers: vi.fn() }));
+vi.mock("../../../lib/documentVersions", () => ({
+  attachActiveVersionPaths: vi.fn(),
+  attachLatestVersionNumbers: vi.fn(),
+  loadActiveVersion: vi.fn(),
+  pendingAiEditVersionIds: vi.fn(),
+}));
 describe("document detail permissions", () => {
   it.each([
     ["viewer", false, "owner-id", null, false, false],

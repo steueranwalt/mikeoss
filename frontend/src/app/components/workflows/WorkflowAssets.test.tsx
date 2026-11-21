@@ -8,10 +8,12 @@ import { WorkflowAssets, type WorkflowAssetsHandle } from "./WorkflowAssets";
 
 const {
     copyDocumentsToWorkflowAssets,
+    getDocumentUrl,
     listWorkflowAssets,
     uploadWorkflowAssets,
 } = vi.hoisted(() => ({
     copyDocumentsToWorkflowAssets: vi.fn(),
+    getDocumentUrl: vi.fn(),
     listWorkflowAssets: vi.fn(),
     uploadWorkflowAssets: vi.fn(),
 }));
@@ -21,15 +23,30 @@ vi.mock("@/app/lib/mikeApi", async (importOriginal) => {
     return {
         ...actual,
         copyDocumentsToWorkflowAssets,
+        getDocumentUrl,
         listWorkflowAssets,
         uploadWorkflowAssets,
     };
 });
 
 vi.mock("../shared/DocumentSidePanel", () => ({
-    DocumentSidePanel: ({ doc }: { doc: Document | null }) =>
+    DocumentSidePanel: ({
+        doc,
+        onDownloadDocument,
+    }: {
+        doc: Document | null;
+        onDownloadDocument?: (id: string) => void;
+    }) =>
         doc ? (
-            <div data-testid="document-side-panel">{doc.filename}</div>
+            <div data-testid="document-side-panel">
+                {doc.filename}
+                <button
+                    type="button"
+                    onClick={() => void onDownloadDocument?.(doc.id)}
+                >
+                    Download
+                </button>
+            </div>
         ) : null,
 }));
 
@@ -209,6 +226,48 @@ describe("WorkflowAssets", () => {
         await waitFor(() => expect(uploadWorkflowAssets).toHaveBeenCalledTimes(2));
         expect(uploadWorkflowAssets.mock.calls[1][1]).toHaveLength(1);
         expect(uploadWorkflowAssets.mock.calls[1][1][0].file).toBe(bad);
+    });
+
+    it("asks to confirm an AI-draft asset download instead of failing with 409", async () => {
+        const { MikeApiError } = await import("@/app/lib/mikeApi");
+        const user = userEvent.setup();
+        getDocumentUrl
+            .mockRejectedValueOnce(
+                new MikeApiError({
+                    message: "This document has AI-proposed changes.",
+                    status: 409,
+                    code: "unresolved_ai_edits",
+                    details: {
+                        confirm_token: "asset-token",
+                        version_id: "version-1",
+                        pending_edit_ids: [],
+                        ai_draft: true,
+                    },
+                }),
+            )
+            .mockResolvedValueOnce({
+                url: "/download/asset",
+                filename: "Precedent.docx",
+                version_id: "version-1",
+            });
+        const click = vi
+            .spyOn(HTMLAnchorElement.prototype, "click")
+            .mockImplementation(() => {});
+        render(<WorkflowAssets workflowId="workflow-1" readOnly={false} />);
+        await user.click(await screen.findByText("Precedent.docx"));
+        await user.click(screen.getByRole("button", { name: "Download" }));
+        expect(await screen.findByRole("dialog")).toHaveTextContent(
+            "Export AI draft?",
+        );
+        await user.click(screen.getByRole("button", { name: "Export anyway" }));
+        await waitFor(() =>
+            expect(getDocumentUrl).toHaveBeenLastCalledWith(
+                "reference-1",
+                undefined,
+                "asset-token",
+            ),
+        );
+        click.mockRestore();
     });
 
 });

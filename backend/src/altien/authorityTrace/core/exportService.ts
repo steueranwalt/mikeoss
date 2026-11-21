@@ -166,6 +166,10 @@ export async function exportCitationReview(
     file_type: "html",
     size_bytes: bytes.byteLength,
     page_count: null,
+  }, {
+    // Gate B4 audit finding N29: the authority-trace report is model-generated
+    // HTML, so it is stored as an unapproved AI draft like generate_docx.
+    aiDraft: true,
   });
   if (versionError) throw new Error(versionError.message);
   const { error: currentVersionError } = await db

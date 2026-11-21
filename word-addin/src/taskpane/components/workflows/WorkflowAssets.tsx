@@ -4,6 +4,7 @@ import {
   deleteWorkflowAsset,
   getWorkflowAssetUrl,
   listWorkflowAssets,
+  MikeApiError,
   uploadWorkflowAssets,
   uploadWorkflowAssetVersion,
 } from "../../api/mikeApi";
@@ -20,6 +21,10 @@ export function WorkflowAssets({
   const [files, setFiles] = useState<Document[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDownload, setPendingDownload] = useState<{
+    fileId: string;
+    token: string;
+  } | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const versionUploadRef = useRef<HTMLInputElement>(null);
   const versionUploadTarget = useRef<Document | null>(null);
@@ -153,16 +158,29 @@ export function WorkflowAssets({
               <button
                 type="button"
                 onClick={() =>
-                  void getWorkflowAssetUrl(file.id)
-                    .then(({ url }) => openExternalUrl(url))
-                    .catch((reason: unknown) =>
+                  void (async () => {
+                    try {
+                      const first = await getWorkflowAssetUrl(file.id);
+                      openExternalUrl(first.url);
+                    } catch (reason: unknown) {
+                      const token =
+                        reason instanceof MikeApiError &&
+                        reason.code === "unresolved_ai_edits" &&
+                        typeof reason.details?.confirm_token === "string"
+                          ? reason.details.confirm_token
+                          : null;
+                      if (token) {
+                        setPendingDownload({ fileId: file.id, token });
+                        return;
+                      }
                       setError(
                         reportFault(reason, {
                           fallback: "Mike couldn't open that file. Try again.",
                           operation: "workflows.run",
                         }).message,
-                      ),
-                    )
+                      );
+                    }
+                  })()
                 }
                 className="text-[10px] text-gray-500"
               >
@@ -205,6 +223,62 @@ export function WorkflowAssets({
           ))}
         </div>
       )}
+      {pendingDownload ? (
+        <div
+          role="dialog"
+          aria-labelledby="ai-draft-export-title"
+          aria-describedby="ai-draft-export-message"
+          className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2"
+        >
+          <p
+            id="ai-draft-export-title"
+            className="text-[11px] font-medium text-amber-950"
+          >
+            KI-Entwurf exportieren?
+          </p>
+          <p
+            id="ai-draft-export-message"
+            className="mt-1 text-[11px] text-amber-900"
+          >
+            KI-Entwurf, nicht freigegeben. Download mit Kennzeichnung?
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="text-[10px] text-gray-700"
+              onClick={() =>
+                void (async () => {
+                  const pending = pendingDownload;
+                  setPendingDownload(null);
+                  try {
+                    const confirmed = await getWorkflowAssetUrl(
+                      pending.fileId,
+                      pending.token,
+                    );
+                    openExternalUrl(confirmed.url);
+                  } catch (reason: unknown) {
+                    setError(
+                      reportFault(reason, {
+                        fallback: "Mike couldn't open that file. Try again.",
+                        operation: "workflows.run",
+                      }).message,
+                    );
+                  }
+                })()
+              }
+            >
+              Trotzdem exportieren
+            </button>
+            <button
+              type="button"
+              className="text-[10px] text-gray-500"
+              onClick={() => setPendingDownload(null)}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

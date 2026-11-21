@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "@/test/msw-server";
-
+import { getBrowserAccessToken } from "@/app/lib/auth-token";
 import { useFetchDocxBytes, invalidateDocxBytes } from "./useFetchDocxBytes";
 
 beforeEach(() => {
@@ -16,6 +16,7 @@ beforeEach(() => {
     invalidateDocxBytes("evict-doc-v");
     invalidateDocxBytes("d1");
     invalidateDocxBytes("d2");
+    invalidateDocxBytes("preview-n41");
 });
 
 describe("useFetchDocxBytes: idle / disabled", () => {
@@ -60,8 +61,9 @@ describe("useFetchDocxBytes: fetch lifecycle", () => {
         const { result } = renderHook(() => useFetchDocxBytes("d1", "v with /slash"));
 
         await waitFor(() => expect(result.current.loading).toBe(false));
-        // encodeURIComponent — spaces are %20, slashes are %2F.
-        expect(receivedSearch).toBe("?version_id=v%20with%20%2Fslash");
+        // encodeURIComponent — spaces are %20, slashes are %2F. purpose=display
+        // marks this a viewer read, not an export (Gate B4 audit finding N20).
+        expect(receivedSearch).toBe("?version_id=v%20with%20%2Fslash&purpose=display");
     });
 
     it("keeps server error details out of the document viewer", async () => {
@@ -238,6 +240,146 @@ describe("useFetchDocxBytes: in-flight dedupe", () => {
 
         // Only one fetch was made.
         expect(fetchCount).toBe(1);
+    });
+
+    it("mints a one-time preview ticket and fetches bytes with it in a header (N41)", async () => {
+        await expect(getBrowserAccessToken()).resolves.toBeNull();
+        let mintedEditId: string | null = null;
+        let receivedTicket: string | null = null;
+        let receivedAuth: string | null = null;
+        server.use(
+            http.post(
+                "*/api/single-documents/:id/tracked-changes-preview/ticket",
+                async ({ request }) => {
+                    const body = (await request.json()) as { edit_id?: string };
+                    mintedEditId = body.edit_id ?? null;
+                    return HttpResponse.json({ ticket: "preview-ticket-1", expires_in: 60 });
+                },
+            ),
+            http.get(
+                "*/api/single-documents/:id/tracked-changes-preview",
+                ({ request }) => {
+                    receivedTicket = request.headers.get("X-Mike-Preview-Ticket");
+                    receivedAuth = request.headers.get("Authorization");
+                    return new HttpResponse(new Uint8Array([1]));
+                },
+            ),
+        );
+
+        const { result } = renderHook(() =>
+            useFetchDocxBytes(
+                "preview-n41",
+                "v1",
+                undefined,
+                "/api/single-documents/preview-n41/tracked-changes-preview?edit_id=edit-1",
+                false,
+            ),
+        );
+
+        await waitFor(() => expect(result.current.bytes).not.toBeNull());
+        expect(mintedEditId).toBe("edit-1");
+        expect(receivedTicket).toBe("preview-ticket-1");
+        expect(receivedAuth).toBeNull();
+        expect(new URL(window.location.href).search).not.toContain("preview-ticket");
+    });
+
+    it("posts the preview ticket to the same origin as an absolute API_BASE GET (N47)", async () => {
+        invalidateDocxBytes("preview-n47");
+        let ticketUrl: string | null = null;
+        let getUrl: string | null = null;
+        server.use(
+            http.post(
+                "http://api.example.test/api/single-documents/:id/tracked-changes-preview/ticket",
+                ({ request }) => {
+                    ticketUrl = request.url;
+                    return HttpResponse.json({
+                        ticket: "preview-ticket-n47",
+                        expires_in: 60,
+                    });
+                },
+            ),
+            http.get(
+                "http://api.example.test/api/single-documents/:id/tracked-changes-preview",
+                ({ request }) => {
+                    getUrl = request.url;
+                    return new HttpResponse(new Uint8Array([2]));
+                },
+            ),
+        );
+
+        const { result } = renderHook(() =>
+            useFetchDocxBytes(
+                "preview-n47",
+                "v1",
+                undefined,
+                "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview?edit_id=edit-9",
+                false,
+            ),
+        );
+
+        await waitFor(() => expect(result.current.bytes).not.toBeNull());
+        expect(ticketUrl).toBe(
+            "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview/ticket",
+        );
+        expect(getUrl).toBe(
+            "http://api.example.test/api/single-documents/preview-n47/tracked-changes-preview?edit_id=edit-9",
+        );
+        expect(new URL(ticketUrl!).origin).toBe(new URL(getUrl!).origin);
+    });
+});
+
+describe("useFetchDocxBytes: relative API_BASE (N50)", () => {
+    afterEach(() => {
+        vi.unstubAllEnvs();
+        vi.resetModules();
+    });
+
+    it("posts the preview ticket to the page origin when API_BASE is relative", async () => {
+        vi.stubEnv("NEXT_PUBLIC_API_BASE_URL", "");
+        vi.resetModules();
+        const { useFetchDocxBytes: useFetchDocxBytesRelative } = await import(
+            "./useFetchDocxBytes"
+        );
+        let ticketUrl: string | null = null;
+        let getUrl: string | null = null;
+        const origin = window.location.origin;
+        server.use(
+            http.post(
+                `${origin}/api/single-documents/:id/tracked-changes-preview/ticket`,
+                ({ request }) => {
+                    ticketUrl = request.url;
+                    return HttpResponse.json({
+                        ticket: "preview-ticket-n50",
+                        expires_in: 60,
+                    });
+                },
+            ),
+            http.get(
+                `${origin}/api/single-documents/:id/tracked-changes-preview`,
+                ({ request }) => {
+                    getUrl = request.url;
+                    return new HttpResponse(new Uint8Array([3]));
+                },
+            ),
+        );
+
+        const { result } = renderHook(() =>
+            useFetchDocxBytesRelative(
+                "preview-n50",
+                "v1",
+                undefined,
+                "/api/single-documents/preview-n50/tracked-changes-preview?edit_id=edit-1",
+                false,
+            ),
+        );
+
+        await waitFor(() => expect(result.current.bytes).not.toBeNull());
+        expect(ticketUrl).toBe(
+            `${origin}/api/single-documents/preview-n50/tracked-changes-preview/ticket`,
+        );
+        expect(getUrl).toBe(
+            `${origin}/api/single-documents/preview-n50/tracked-changes-preview?edit_id=edit-1`,
+        );
     });
 });
 

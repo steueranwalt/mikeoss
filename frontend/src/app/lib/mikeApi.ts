@@ -157,18 +157,27 @@ export class MikeApiError extends Error {
     status: number;
     code: string | null;
     requestId: string | null;
+    /**
+     * The full parsed JSON error body, when there was one — e.g. a 409
+     * "unresolved_ai_edits" response's confirm_token/version_id/
+     * pending_edit_ids/ai_draft (Gate B4 audit finding N12). Most callers
+     * only need `code`/`message`; this is for the few that need the rest.
+     */
+    details: Record<string, unknown> | null;
 
     constructor(args: {
         message: string;
         status: number;
         code?: string | null;
         requestId?: string | null;
+        details?: Record<string, unknown> | null;
     }) {
         super(args.message);
         this.name = "MikeApiError";
         this.status = args.status;
         this.code = args.code ?? null;
         this.requestId = args.requestId ?? null;
+        this.details = args.details ?? null;
     }
 }
 
@@ -415,6 +424,7 @@ async function toApiError(
                     : typeof parsed.detail === "string" && parsed.detail
                       ? parsed.detail
                       : MALFORMED_ERROR_RESPONSE_MESSAGE,
+            details: parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null,
         });
         // 4xx are intentional answers (validation, permissions) and are
         // shown to the user; 5xx are failures worth an alert, correlated to
@@ -2760,6 +2770,10 @@ export interface DocumentVersion {
     textless_page_count?: number | null;
     deleted_at?: string | null;
     deleted_by?: string | null;
+    /** Gate B4: this version is an unreviewed AI draft. */
+    ai_draft?: boolean;
+    /** Gate B4 N31: pending KI edits or an unreviewed draft. */
+    unresolved_ai?: boolean;
 }
 
 export async function listDocumentVersions(documentId: string): Promise<{
@@ -2868,6 +2882,18 @@ export async function deleteDocumentVersion(
     });
 }
 
+/** Gate B4: a human reviewed this AI-drafted version and clears the draft flag. */
+export async function approveAiDraftVersion(
+    documentId: string,
+    versionId: string,
+): Promise<DocumentVersion> {
+    return apiRequest<DocumentVersion>(
+        "documents.directory",
+        `/single-documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/approve-draft`,
+        { method: "POST" },
+    );
+}
+
 export async function uploadProjectDocument(
     projectId: string,
     file: File,
@@ -2932,6 +2958,20 @@ export async function getDocument(documentId: string, isCurrentAccount?: () => b
     return apiRequest<Document>("documents.directory", `/single-documents/${documentId}`, undefined, isCurrentAccount);
 }
 
+/** Gate B4 audit finding N30/N31: whether this version is an unreviewed AI draft or still has pending KI edits. */
+export async function getDocumentAiStatus(
+    documentId: string,
+    versionId?: string | null,
+): Promise<{ ai_draft: boolean; unresolved_ai: boolean }> {
+    const params = versionId
+        ? `?version_id=${encodeURIComponent(versionId)}`
+        : "";
+    return apiRequest(
+        "documents.directory",
+        `/single-documents/${encodeURIComponent(documentId)}/ai-status${params}`,
+    );
+}
+
 export async function deleteDocument(documentId: string): Promise<void> {
     await apiRequest("documents.directory", `/single-documents/${documentId}`, { method: "DELETE" });
 }
@@ -2959,9 +2999,16 @@ export async function resolveDocumentEdit(
 export async function getDocumentUrl(
     documentId: string,
     versionId?: string | null,
+    confirmToken?: string,
 ): Promise<{ url: string; filename: string; version_id: string | null }> {
-    const qs = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
-    return apiRequest("documents.directory", `/single-documents/${documentId}/url${qs}`);
+    const params: Record<string, string> = {
+        ...(versionId ? { version_id: versionId } : {}),
+        ...(confirmToken ? { confirm_token: confirmToken } : {}),
+    };
+    const qs = Object.entries(params)
+        .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+        .join("&");
+    return apiRequest("documents.directory", `/single-documents/${documentId}/url${qs ? `?${qs}` : ""}`);
 }
 
 /**
@@ -2978,8 +3025,9 @@ export async function downloadResolvedDocument(
     documentId: string,
     versionId: string | null,
     fallbackFilename: string,
+    confirmToken?: string,
 ): Promise<void> {
-    const { url, filename } = await getDocumentUrl(documentId, versionId);
+    const { url, filename } = await getDocumentUrl(documentId, versionId, confirmToken);
     const name = filename || fallbackFilename;
 
     // Absolute pre-signed URL (R2): the browser fetches it directly; adding an
@@ -3010,28 +3058,71 @@ export async function downloadResolvedDocument(
 function documentFilePath(
     documentId: string,
     versionId?: string | null,
+    extraParams?: Record<string, string>,
 ): string {
-    const qs = versionId ? `?version_id=${encodeURIComponent(versionId)}` : "";
-    return `/single-documents/${encodeURIComponent(documentId)}/file${qs}`;
+    const params: Record<string, string> = { ...(versionId ? { version_id: versionId } : {}), ...extraParams };
+    const qs = Object.entries(params)
+        .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+        .join("&");
+    return `/single-documents/${encodeURIComponent(documentId)}/file${qs ? `?${qs}` : ""}`;
 }
 
+// Gate B4 audit finding N20: the in-app docx/spreadsheet viewer reads raw
+// bytes to render inline. Gate B4 audit finding N23: /file no longer
+// exempts purpose=display for AI drafts — viewers of drafts load /display
+// instead. This helper is the DocxView path for non-draft files.
 export function getDocumentFileUrl(
     documentId: string,
     versionId?: string | null,
 ): string {
-    return `${API_BASE}${documentFilePath(documentId, versionId)}`;
+    return `${API_BASE}${documentFilePath(documentId, versionId, { purpose: "display" })}`;
 }
 
+/**
+ * Gate B4 N30/N37: display-only Tracked Changes preview. Not an export —
+ * DocxView is the only consumer. Requires open document_edits and the
+ * edit_id of the EditCard being shown.
+ */
+export function getTrackedChangesPreviewUrl(
+    documentId: string,
+    versionId?: string | null,
+    editId?: string | null,
+): string {
+    const parts: string[] = [];
+    if (versionId) parts.push(`version_id=${encodeURIComponent(versionId)}`);
+    if (editId) parts.push(`edit_id=${encodeURIComponent(editId)}`);
+    const query = parts.length ? `?${parts.join("&")}` : "";
+    return `${API_BASE}/single-documents/${encodeURIComponent(documentId)}/tracked-changes-preview${query}`;
+}
+
+/**
+ * The actual "download this document" action — unlike getDocumentFileUrl
+ * this is an export, and the backend may answer 409 (code
+ * "unresolved_ai_edits" or "stamping_failed") when the document has
+ * unresolved AI-proposed changes or an unapproved AI draft that needs
+ * confirming first (Gate B4 audit finding N12). `confirmToken` replays a
+ * confirmation the caller already obtained (e.g. from a previous 409's
+ * body) back to the server.
+ */
 export async function getDocumentFile(
     documentId: string,
     versionId?: string | null,
+    confirmToken?: string,
 ): Promise<{ blob: Blob; filename: string | null }> {
-    return apiBlobRequest("documents.directory", documentFilePath(documentId, versionId));
+    return apiBlobRequest(
+        "documents.directory",
+        documentFilePath(
+            documentId,
+            versionId,
+            confirmToken ? { confirm_token: confirmToken } : undefined,
+        ),
+    );
 }
 
 export async function downloadDocumentsZip(
     documentIds: string[],
     folderIds: string[] = [],
+    confirmTokens?: Record<string, string>,
 ): Promise<Blob> {
     const response = await apiFetch(
         `${API_BASE}/single-documents/download-zip`,
@@ -3044,6 +3135,7 @@ export async function downloadDocumentsZip(
             body: JSON.stringify({
                 document_ids: documentIds,
                 folder_ids: folderIds,
+                ...(confirmTokens ? { confirm_tokens: confirmTokens } : {}),
             }),
         }, "documents.directory",
     );

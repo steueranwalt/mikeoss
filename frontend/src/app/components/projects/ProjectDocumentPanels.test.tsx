@@ -12,6 +12,13 @@ import {
 
 const localExport = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock("@/app/lib/authEvents", () => ({ authenticatedFetch: vi.fn() }));
+vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("@/app/lib/mikeApi")>()),
+    getDocumentAiStatus: vi.fn().mockResolvedValue({
+        ai_draft: false,
+        unresolved_ai: false,
+    }),
+}));
 vi.mock("./ProjectWorkspaceTips", () => ({
     ProjectWorkspaceTips: () => <p>Open a document</p>,
 }));

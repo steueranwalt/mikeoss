@@ -53,17 +53,22 @@ afterAll(() => {
 });
 
 type Insert = { table: string; payload: Record<string, unknown> };
+type Update = { table: string; payload: Record<string, unknown> };
 
 // Chainable Supabase double: records inserts, returns fixed ids.
 function makeDb() {
   const inserts: Insert[] = [];
+  const updates: Update[] = [];
   function from(table: string) {
     const b: Record<string, unknown> = {
       insert(payload: Record<string, unknown>) {
         inserts.push({ table, payload });
         return b;
       },
-      update: () => b,
+      update(payload: Record<string, unknown>) {
+        updates.push({ table, payload });
+        return b;
+      },
       select: () => b,
       eq: () => b,
       single: () =>
@@ -76,7 +81,7 @@ function makeDb() {
     };
     return b;
   }
-  return { inserts, from, rpc: vi.fn(async (name: string, args: { p_document_id: string; p_version: Record<string, unknown>; p_activate: boolean }) => {
+  return { inserts, updates, from, rpc: vi.fn(async (name: string, args: { p_document_id: string; p_version: Record<string, unknown>; p_activate: boolean }) => {
     expect(name).toBe("create_document_version");
     expect(args.p_activate).toBe(true);
     inserts.push({ table: "document_versions", payload: { ...args.p_version, document_id: args.p_document_id } });
@@ -255,6 +260,32 @@ describe("generated document naming", () => {
       const out = await generate(extension, JAPANESE_TITLE);
       const archive = await JSZip.loadAsync(out.uploadedBytes);
       expect(archive.file("[Content_Types].xml")).not.toBeNull();
+    },
+  );
+});
+
+// Gate B4 audit finding L4.
+describe("generated documents are marked AI drafts", () => {
+  it.each(["docx", "xlsx", "pptx"] as const)(
+    "%s: a new model-generated document is stored as ai_draft",
+    async (extension) => {
+      const db = makeDb();
+      const result =
+        extension === "docx"
+          ? await generateDocx("NDA", SECTIONS, "user-1", db as never)
+          : extension === "xlsx"
+            ? await generateExcel("Budget", SHEETS, "user-1", db as never)
+            : await generatePpt("Pitch", SLIDES, "user-1", db as never);
+
+      expect(result).not.toHaveProperty("error");
+      // Gate B4 audit finding N9: ai_draft rides in the same
+      // create_document_version RPC call as the rest of the version, not a
+      // follow-up update.
+      const versionInsert = db.inserts.find(
+        (i) => i.table === "document_versions",
+      );
+      expect(versionInsert?.payload).toMatchObject({ ai_draft: true });
+      expect(db.updates).toHaveLength(0);
     },
   );
 });

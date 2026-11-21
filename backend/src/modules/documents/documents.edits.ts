@@ -1,7 +1,7 @@
 // Tracked-change (assistant edit) operations: accepting / rejecting an
 // individual edit in the active DOCX.
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { downloadFile, uploadFile, deleteFileBestEffort, versionStorageKey } from "../../lib/storage";
 import { resolveTrackedChange } from "../../lib/docxTrackedChanges";
 import { buildDownloadUrl } from "../../lib/downloadTokens";
@@ -17,6 +17,149 @@ import { devLog } from "../../lib/log";
 // ---------------------------------------------------------------------------
 // Accept / reject a tracked-change edit
 // ---------------------------------------------------------------------------
+
+/** What an export/download confirmation is actually confirming. */
+export type AiDraftConfirmationState = {
+    /** sha256 of {version_id, pending_edit_ids, ai_draft}, hex-encoded. */
+    confirmToken: string;
+    versionId: string;
+    pendingEditIds: string[];
+    aiDraft: boolean;
+};
+
+/**
+ * Gate B4 audit findings L3/N7: whether the version actually being handed
+ * out — `versionId` if given, else the document's active version — is
+ * something a human has not actually approved yet: either it carries an
+ * AI-proposed tracked change that has not been accepted or rejected
+ * (document_edits.status='pending', scoped to this exact version_id — Gate
+ * B4 audit finding N15: a historical version a caller explicitly requested
+ * never contains edits proposed against a *later* version, so those do not
+ * apply to it), OR the version itself is still an AI draft
+ * (document_versions.ai_draft, Gate B4 audit finding L4) that nobody has
+ * called approve-draft on. Either condition alone is enough: a version with
+ * no pending tracked changes can still be a fresh write_project_document/
+ * generate_docx draft nobody has reviewed, and a reviewed, non-draft
+ * version can still carry its own unrelated pending changes. Returns null
+ * when neither condition applies (nothing to confirm) or the version does
+ * not exist / does not belong to this document.
+ *
+ * Gate B4 audit finding N5: a caller does not merely assert
+ * `confirm_ai_draft=1` — it must present confirmToken, computed from the
+ * exact pending edit ids and version id this function just read. A stale
+ * token (a new edit landed, or the version moved on) cannot be replayed:
+ * computing the current token again yields a different value, so an old
+ * confirmation from before the document changed is rejected the same as no
+ * confirmation at all (see requireAiDraftConfirmationOrRespond409).
+ *
+ * Every export/download output path uses this single function to require
+ * explicit confirmation before handing out a file whose visible content
+ * does not yet reflect what a human has actually approved (Gate B4 audit
+ * finding N4 — this used to be one route's own check, now it is the one
+ * place that decision is made at all).
+ */
+export async function aiDraftConfirmationState(
+    documentId: string,
+    db: Db,
+    /**
+     * Gate B4 audit finding N15: the version actually being delivered.
+     * Omit to mean "the document's current active version" — but a caller
+     * that already resolved a specific version (a ?version_id query param,
+     * or a download token minted against one particular storage_path) must
+     * pass that exact id, not rely on the default, or this function silently
+     * checks a different version than the one it hands out.
+     */
+    versionId?: string | null,
+): Promise<AiDraftConfirmationState | null> {
+    const targetVersion = await loadActiveVersion(documentId, db, versionId);
+    if (!targetVersion) return null;
+    const { data: pendingEdits, error: pendingEditsError } = await db
+        .from("document_edits")
+        .select("id")
+        .eq("version_id", targetVersion.id)
+        .eq("status", "pending")
+        .order("id", { ascending: true });
+    // Gate B4 audit finding N28: a failed pending-edits read is a refusal,
+    // not "there are none". Treating `error` as an empty list would let an
+    // export skip confirmation while unresolved edits still exist.
+    if (pendingEditsError) {
+        throw pendingEditsError instanceof Error
+            ? pendingEditsError
+            : new Error("Failed to read pending document_edits");
+    }
+    const pendingEditIds = ((pendingEdits ?? []) as { id: string }[]).map((row) => row.id);
+    const aiDraft = targetVersion.ai_draft === true;
+    if (pendingEditIds.length === 0 && !aiDraft) return null;
+    const confirmToken = createHash("sha256")
+        .update(JSON.stringify({ version_id: targetVersion.id, pendingEditIds, aiDraft }))
+        .digest("hex");
+    return { confirmToken, versionId: targetVersion.id, pendingEditIds, aiDraft };
+}
+
+/**
+ * The one check every export/download output path makes (Gate B4 audit
+ * finding N4): `ok: true` when there is nothing to confirm or the caller's
+ * token matches the document's current pending-edits/draft state exactly;
+ * otherwise `ok: false`. `state` is present whenever there was something to
+ * confirm at all — even when `ok: true` because the token matched — so a
+ * caller can tell "nothing to confirm" (state undefined) apart from
+ * "confirmed" (ok: true, state present) to decide whether to stamp a docx
+ * (Gate B4 audit finding N6: only a confirmed draft needs the banner).
+ */
+export async function checkAiDraftConfirmation(
+    documentId: string,
+    providedToken: string | undefined,
+    db: Db,
+    /** Gate B4 audit finding N15: see aiDraftConfirmationState. */
+    versionId?: string | null,
+): Promise<
+    | { ok: true; state?: AiDraftConfirmationState }
+    | { ok: false; state: AiDraftConfirmationState }
+> {
+    const state = await aiDraftConfirmationState(documentId, db, versionId);
+    if (!state) return { ok: true };
+    if (providedToken && providedToken === state.confirmToken) return { ok: true, state };
+    return { ok: false, state };
+}
+
+/**
+ * Convenience wrapper around `checkAiDraftConfirmation` for every HTTP output
+ * path (Gate B4 audit finding N4: `/file`, `/url`, `/download/:token`,
+ * `/download-zip`, and the `documents-zip` export job all call this one
+ * function instead of each re-deriving the 409 body). `proceed: false`
+ * carries the exact body the route should answer with; `proceed: true`
+ * carries `state` only when there was something to confirm at all, so a
+ * caller can still tell "nothing to confirm" from "confirmed" for stamping.
+ */
+export async function requireAiDraftConfirmationOrRespond409(
+    documentId: string,
+    confirmToken: string | undefined,
+    db: Db,
+    /** Gate B4 audit finding N15: see aiDraftConfirmationState. */
+    versionId?: string | null,
+): Promise<
+    | { proceed: true; state?: AiDraftConfirmationState }
+    | { proceed: false; body: ReturnType<typeof aiDraftConfirmationResponseBody> }
+> {
+    const result = await checkAiDraftConfirmation(documentId, confirmToken, db, versionId);
+    if (result.ok) return { proceed: true, state: result.state };
+    return { proceed: false, body: aiDraftConfirmationResponseBody(result.state) };
+}
+
+/** The 409 body every HTTP output path answers with when confirmation is missing or stale. */
+export function aiDraftConfirmationResponseBody(state: AiDraftConfirmationState) {
+    return {
+        code: "unresolved_ai_edits",
+        detail:
+            "This document has AI-proposed changes or an unapproved AI draft that has not been confirmed yet. " +
+            "Confirm the download with the current confirm_token to get it anyway, marked as an AI draft, " +
+            "or resolve the pending changes / approve the draft first.",
+        confirm_token: state.confirmToken,
+        version_id: state.versionId,
+        pending_edit_ids: state.pendingEditIds,
+        ai_draft: state.aiDraft,
+    };
+}
 
 export async function resolveEdit(
     mode: "accept" | "reject",

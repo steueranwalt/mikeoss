@@ -1,5 +1,6 @@
 import type { PanelDocument } from "../shared/types";
 import {
+    getDocumentAiStatus,
     listDocumentVersions,
     MikeApiError,
     type DocumentVersion,
@@ -41,13 +42,45 @@ function isAccessRefusal(error: unknown): boolean {
     );
 }
 
+function withAiStatus(
+    document: PanelDocument,
+    status: { ai_draft?: boolean; unresolved_ai?: boolean },
+): PanelDocument {
+    return {
+        ...document,
+        ai_draft: status.ai_draft === true,
+        unresolved_ai:
+            status.unresolved_ai === true || status.ai_draft === true,
+    };
+}
+
 export async function resolvePanelDocumentVersionResult(
     document: PanelDocument,
     loadVersions: (documentId: string) => Promise<VersionList> =
         listDocumentVersions,
+    loadAiStatus: (
+        documentId: string,
+        versionId?: string | null,
+    ) => Promise<{ ai_draft: boolean; unresolved_ai: boolean }> =
+        getDocumentAiStatus,
 ): Promise<PanelDocumentResolution> {
-    if (document.type === "case" || document.version_id)
-        return { status: "resolved", document };
+    if (document.type === "case") return { status: "resolved", document };
+
+    if (document.version_id) {
+        try {
+            const status = await loadAiStatus(
+                document.document_id,
+                document.version_id,
+            );
+            return {
+                status: "resolved",
+                document: withAiStatus(document, status),
+            };
+        } catch {
+            // Gate B4 N31: still open the tab; DocumentContent queries again.
+            return { status: "resolved", document };
+        }
+    }
 
     let result: VersionList;
     try {
@@ -67,11 +100,14 @@ export async function resolvePanelDocumentVersionResult(
     if (!version) return { status: "unavailable" };
     return {
         status: "resolved",
-        document: {
-            ...document,
-            version_id: version.id,
-            version_number: version.version_number,
-        },
+        document: withAiStatus(
+            {
+                ...document,
+                version_id: version.id,
+                version_number: version.version_number,
+            },
+            version,
+        ),
     };
 }
 

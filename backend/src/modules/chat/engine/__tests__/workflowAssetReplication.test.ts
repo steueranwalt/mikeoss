@@ -232,7 +232,14 @@ describe("workflow asset replication", () => {
             storage_path: expectedKey,
             filename: "Client precedent.pdf",
             file_type: "pdf",
-            source: "upload",
+            // Gate B4 audit finding N14: not 'upload' — that value also
+            // means a genuine human upload (migration 0123's "publish file"
+            // RPC), so a replicated copy needs its own source to be
+            // distinguishable at all.
+            source: "replicated",
+            // Gate B4 audit finding N8: a replicated copy is marked an AI
+            // draft, the same as any other model-created document.
+            ai_draft: true,
         });
         expect(index["doc-0"]).toMatchObject({
             document_id: documentId,

@@ -208,7 +208,9 @@ export type PersistWordDocumentEdit = (
   messageId: string,
   blockIndex: number,
   edit: RedlineEdit,
-  applyMode: "direct" | "approval",
+  // Gate B4 audit finding N13: narrowed from "direct" | "approval" — every
+  // Word edit is reviewed before it reaches the document, never "direct".
+  applyMode: "approval",
 ) => Promise<WordDocumentEdit>;
 
 export interface PersistedWordEditPatch {

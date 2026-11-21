@@ -9,6 +9,35 @@ vi.mock("./views/DocxView", () => ({
 }));
 vi.mock("./views/PdfView", () => ({ PdfView: () => <div data-testid="pdf-view" /> }));
 vi.mock("./views/SpreadsheetView", () => ({ SpreadsheetView: () => <div data-testid="spreadsheet-view" /> }));
+vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("@/app/lib/mikeApi")>()),
+    getDocumentAiStatus: vi.fn().mockResolvedValue({
+        ai_draft: false,
+        unresolved_ai: false,
+    }),
+}));
+
+it("shows the KI-Entwurf banner over an unreviewed file without blocking display", () => {
+    render(
+        <DocumentContent
+            mode={{ kind: "document" }}
+            canEdit
+            document={{
+                document_id: "document-1",
+                title: "Draft.docx",
+                type: "docx",
+                metadata: [],
+                quotes: [],
+                version_id: "version-1",
+                ai_draft: true,
+            }}
+        />,
+    );
+    expect(screen.getByText("KI-Entwurf, nicht freigegeben")).toBeVisible();
+    expect(screen.getByText("KI-Entwurf")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve draft" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download" })).toBeVisible();
+});
 
 it.each(["docx", "pdf", "spreadsheet"] as const)("keeps the assistant title bar for %s", (type) => {
     render(<DocumentContent mode={{ kind: "document" }} document={{

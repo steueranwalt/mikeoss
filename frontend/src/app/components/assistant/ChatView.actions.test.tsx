@@ -110,6 +110,10 @@ vi.mock("@/app/lib/mikeApi", async (importOriginal) => ({
     getDocumentFile: vi.fn(),
     getPlaybook: vi.fn(),
     listQuickActions: vi.fn().mockResolvedValue([]),
+    getDocumentAiStatus: vi.fn().mockResolvedValue({
+        ai_draft: false,
+        unresolved_ai: false,
+    }),
 }));
 vi.mock("../shared/views/SpreadsheetView", () => ({
     SpreadsheetView: ({
@@ -995,7 +999,11 @@ describe("assistant document tab actions", () => {
         );
         fireEvent.click(screen.getByRole("menuitem", { name: "Download" }));
         await waitFor(() =>
-            expect(getDocumentFile).toHaveBeenCalledWith("excel-1", "excel-v4"),
+            expect(getDocumentFile).toHaveBeenCalledWith(
+                "excel-1",
+                "excel-v4",
+                undefined,
+            ),
         );
         expect(
             await screen.findByText(

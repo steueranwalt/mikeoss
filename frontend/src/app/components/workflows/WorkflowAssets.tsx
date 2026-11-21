@@ -23,6 +23,10 @@ import {
   type DocumentVersion,
 } from "@/app/lib/mikeApi";
 import {
+  AiDraftExportCancelled,
+  useAiDraftExport,
+} from "@/app/hooks/useAiDraftExport";
+import {
   SUPPORTED_DOCUMENT_ACCEPT,
   formatUnsupportedDocumentWarning,
   partitionSupportedDocumentFiles,
@@ -105,6 +109,7 @@ export const WorkflowAssets = forwardRef<
     null,
   );
   const [deleteStatus, setDeleteStatus] = useState<"idle" | "loading">("idle");
+  const { confirmExport, dialog: aiDraftExportDialog } = useAiDraftExport();
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const versionUploadInputRef = useRef<HTMLInputElement>(null);
   const versionUploadTargetRef = useRef<Document | null>(null);
@@ -295,12 +300,15 @@ export const WorkflowAssets = forwardRef<
   async function download(file: Document, versionId?: string | null) {
     setBusyId(file.id);
     try {
-      const resolved = await getDocumentUrl(file.id, versionId);
-      const anchor = document.createElement("a");
-      anchor.href = resolved.url;
-      anchor.download = resolved.filename || file.filename;
-      anchor.click();
+      await confirmExport(async (confirmToken) => {
+        const resolved = await getDocumentUrl(file.id, versionId, confirmToken);
+        const anchor = document.createElement("a");
+        anchor.href = resolved.url;
+        anchor.download = resolved.filename || file.filename;
+        anchor.click();
+      });
     } catch (caught) {
+      if (caught instanceof AiDraftExportCancelled) return;
       reportFault(caught, ASSET_FLOW);
       setError(userFacingApiError(caught, "Download failed."));
     } finally {
@@ -523,6 +531,7 @@ export const WorkflowAssets = forwardRef<
           await deleteAsset(asset);
         }}
       />
+      {aiDraftExportDialog}
       <ConfirmPopup
         open={pendingDeleteFile !== null}
         title="Delete asset?"

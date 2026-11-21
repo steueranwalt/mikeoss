@@ -9,6 +9,7 @@ const {
   startLocalStack,
   stopLocalStack,
   localStackActive,
+  isFrontendLoginReady,
 } = require("./supervisor");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -70,4 +71,17 @@ test("a stop during boot ends the boot and leaves nothing running", async (t) =>
   await assert.rejects(booting, /stopped during boot/);
   assert.equal(localStackActive(), false);
   assert.ok(!statuses.includes("Starting auth…"), "no service starts after the stop");
+});
+
+test("frontend is ready only on same-origin GET /login/ with 200", () => {
+  const origin = "http://127.0.0.1:3000";
+  assert.equal(isFrontendLoginReady(200, undefined, origin), true);
+  assert.equal(isFrontendLoginReady(200, "/login/", origin), true);
+  assert.equal(isFrontendLoginReady(301, "/login/", origin), false);
+  assert.equal(isFrontendLoginReady(302, "/login/", origin), false);
+  assert.equal(isFrontendLoginReady(500, undefined, origin), false);
+  assert.equal(
+    isFrontendLoginReady(200, "https://evil.example/login/", origin),
+    false,
+  );
 });

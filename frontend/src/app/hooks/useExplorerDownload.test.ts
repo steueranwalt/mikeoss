@@ -42,7 +42,7 @@ describe("explorer downloads", () => {
         vi.mocked(getDocumentUrl).mockResolvedValue({ url: "https://example.com/version", filename: "Historical.docx", version_id: "v1" });
         const { result } = renderHook(() => useExplorerDownload());
         await act(async () => { await result.current.downloadDocument(documentFile, "v1"); });
-        expect(getDocumentUrl).toHaveBeenCalledWith("doc-1", "v1");
+        expect(getDocumentUrl).toHaveBeenCalledWith("doc-1", "v1", undefined);
     });
 
     it("downloads the active document using the server's current filename", async () => {
@@ -55,7 +55,7 @@ describe("explorer downloads", () => {
         await act(async () => {
             await result.current.downloadDocument(documentFile);
         });
-        expect(getDocumentUrl).toHaveBeenCalledWith("doc-1");
+        expect(getDocumentUrl).toHaveBeenCalledWith("doc-1", undefined, undefined);
         expect(downloads).toEqual([
             {
                 href: "https://files.example/draft",

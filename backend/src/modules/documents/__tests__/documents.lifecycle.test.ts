@@ -29,6 +29,8 @@ describe("document version persistence boundary", () => {
         storage_path: "new/key",
         source: "user_upload",
         filename: "Clause.docx",
+        // Gate B4 audit finding N9: always explicit, atomic with the insert.
+        ai_draft: false,
       },
       p_activate: true,
     });
